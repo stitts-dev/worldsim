@@ -1,23 +1,26 @@
 using System;
 using System.Collections.Generic;
-using System.Text;
 using System.Threading;
 using UnityEngine;
-using uPLibrary.Networking.M2Mqtt;
-using uPLibrary.Networking.M2Mqtt.Messages;
 
 namespace WorldSim.Core
 {
     /// <summary>
-    /// Thin MonoBehaviour wrapper around M2Mqtt: connect with backoff reconnect,
-    /// publish/subscribe JSON string payloads, periodic telemetry heartbeat.
+    /// Thin MonoBehaviour wrapper around MqttClientLite: connect with backoff
+    /// reconnect, publish/subscribe JSON string payloads, periodic telemetry
+    /// heartbeat.
     ///
     /// <see cref="OnMessage"/> always fires on the main thread (marshaled via the
     /// SynchronizationContext captured in Awake) so subscribers (e.g. VirtualTurret)
-    /// can touch Unity API directly without worrying about M2Mqtt's receiver thread.
+    /// can touch Unity API directly without worrying about the client's receive thread.
     /// </summary>
     public class MqttBridge : MonoBehaviour
     {
+        /// <summary>QoS 0 - the contract uses this for telemetry.</summary>
+        public const byte QosAtMostOnce = 0;
+        /// <summary>QoS 1 - the contract requires this on deterrent/*.</summary>
+        public const byte QosAtLeastOnce = 1;
+
         [Header("Broker")]
         public string brokerHost = "localhost";
         public int brokerPort = 1883;
@@ -36,12 +39,12 @@ namespace WorldSim.Core
         /// <summary>(topic, jsonPayload) - always invoked on the main thread.</summary>
         public event Action<string, string> OnMessage;
 
-        MqttClient _client;
+        MqttClientLite _client;
         string _clientId;
         SynchronizationContext _mainCtx;
 
-        // Topics we want subscribed, replayed on every (re)connect - M2Mqtt doesn't
-        // give us a persistent session here, so re-subscribing ourselves is simplest.
+        // Topics we want subscribed, replayed on every (re)connect - we always
+        // connect with a clean session, so re-subscribing ourselves is simplest.
         // Maps topic -> qos.
         readonly Dictionary<string, byte> _subscriptions = new Dictionary<string, byte>();
         readonly object _subLock = new object();
@@ -98,10 +101,10 @@ namespace WorldSim.Core
         {
             if (_connecting) return;
             _connecting = true;
-            // ponytail: MqttClient.Connect() blocks on socket I/O. Running it off
-            // the main thread keeps Play mode from hitching every time the broker
-            // is down (which is exactly when reconnect-with-backoff needs to keep
-            // firing without freezing the sim).
+            // ponytail: Connect() blocks on socket I/O. Running it off the main
+            // thread keeps Play mode from hitching every time the broker is down
+            // (which is exactly when reconnect-with-backoff needs to keep firing
+            // without freezing the sim).
             ThreadPool.QueueUserWorkItem(_ => ConnectWorker());
         }
 
@@ -109,35 +112,26 @@ namespace WorldSim.Core
         {
             try
             {
-                var client = new MqttClient(brokerHost, brokerPort, false, MqttSslProtocols.None, null, null);
-                client.MqttMsgPublishReceived += HandlePublishReceived;
+                var client = new MqttClientLite();
+                client.MessageReceived += HandlePublishReceived;
                 client.ConnectionClosed += HandleConnectionClosed;
+                client.Connect(brokerHost, brokerPort, _clientId);
 
-                byte code = client.Connect(_clientId);
-                if (code == MqttMsgConnack.CONN_ACCEPTED)
+                if (_stopping)
                 {
-                    if (_stopping)
-                    {
-                        // OnDisable fired while we were blocked in Connect() - don't
-                        // adopt this client, just close it so its receiver thread
-                        // doesn't outlive Play-mode stop.
-                        client.MqttMsgPublishReceived -= HandlePublishReceived;
-                        client.ConnectionClosed -= HandleConnectionClosed;
-                        try { if (client.IsConnected) client.Disconnect(); } catch (Exception) { /* going away anyway */ }
-                        return;
-                    }
-
-                    if (_client != null) Disconnect();
-                    _client = client;
-                    _reconnectDelay = reconnectMinDelaySec; // reset backoff on success
-                    ResubscribeAll();
-                }
-                else
-                {
-                    client.MqttMsgPublishReceived -= HandlePublishReceived;
+                    // OnDisable fired while we were blocked in Connect() - don't
+                    // adopt this client, just close it so its receive thread
+                    // doesn't outlive Play-mode stop.
+                    client.MessageReceived -= HandlePublishReceived;
                     client.ConnectionClosed -= HandleConnectionClosed;
-                    ScheduleReconnect();
+                    try { client.Disconnect(); } catch (Exception) { /* going away anyway */ }
+                    return;
                 }
+
+                if (_client != null) Disconnect();
+                _client = client;
+                _reconnectDelay = reconnectMinDelaySec; // reset backoff on success
+                ResubscribeAll();
             }
             catch (Exception)
             {
@@ -155,7 +149,7 @@ namespace WorldSim.Core
             _reconnectDelay = Mathf.Min(_reconnectDelay * 2f, reconnectMaxDelaySec);
         }
 
-        void HandleConnectionClosed(object sender, EventArgs e)
+        void HandleConnectionClosed()
         {
             ScheduleReconnect();
         }
@@ -163,19 +157,15 @@ namespace WorldSim.Core
         void Disconnect()
         {
             if (_client == null) return;
-            _client.MqttMsgPublishReceived -= HandlePublishReceived;
+            _client.MessageReceived -= HandlePublishReceived;
             _client.ConnectionClosed -= HandleConnectionClosed;
-            try { if (_client.IsConnected) _client.Disconnect(); } catch (Exception) { /* going away anyway */ }
+            try { _client.Disconnect(); } catch (Exception) { /* going away anyway */ }
             _client = null;
         }
 
         // ---- pub/sub ----
 
-        // ponytail: default qos is 0 (QOS_LEVEL_AT_MOST_ONCE) as a literal, not the
-        // MqttMsgBase constant - default-parameter values must be compile-time
-        // constants, and depending on the exact M2Mqtt build having that field be
-        // `const` (vs. `static readonly`) isn't worth the compile risk.
-        public void Subscribe(string topic, byte qos = 0)
+        public void Subscribe(string topic, byte qos = QosAtMostOnce)
         {
             lock (_subLock)
             {
@@ -185,34 +175,29 @@ namespace WorldSim.Core
                 _subscriptions[topic] = qos;
             }
             if (IsConnected)
-                _client.Subscribe(new[] { topic }, new[] { qos });
+                _client.Subscribe(topic, qos);
         }
 
         void ResubscribeAll()
         {
             lock (_subLock)
             {
-                if (_subscriptions.Count == 0) return;
-                var topics = new string[_subscriptions.Count];
-                var qosLevels = new byte[_subscriptions.Count];
-                _subscriptions.Keys.CopyTo(topics, 0);
-                _subscriptions.Values.CopyTo(qosLevels, 0);
-                _client.Subscribe(topics, qosLevels);
+                foreach (KeyValuePair<string, byte> sub in _subscriptions)
+                    _client.Subscribe(sub.Key, sub.Value);
             }
         }
 
         /// <summary>Fire-and-forget publish. No-op (and no queue) if not currently connected -
         /// ponytail: acceptable for a telemetry/deterrent-ack sim, not a store-and-forward broker.</summary>
-        public void Publish(string topic, string jsonPayload, byte qos = 0)
+        public void Publish(string topic, string jsonPayload, byte qos = QosAtMostOnce)
         {
             if (!IsConnected) return;
-            _client.Publish(topic, Encoding.UTF8.GetBytes(jsonPayload), qos, false);
+            try { _client.Publish(topic, jsonPayload, qos); }
+            catch (Exception) { /* socket dropped mid-write; the reconnect loop picks it up */ }
         }
 
-        void HandlePublishReceived(object sender, MqttMsgPublishEventArgs e)
+        void HandlePublishReceived(string topic, string payload)
         {
-            string topic = e.Topic;
-            string payload = Encoding.UTF8.GetString(e.Message);
             _mainCtx.Post(_ => OnMessage?.Invoke(topic, payload), null);
         }
 
@@ -224,7 +209,7 @@ namespace WorldSim.Core
                 source = telemetrySource,
                 status = "ok"
             };
-            Publish(telemetryTopic, JsonUtility.ToJson(msg), MqttMsgBase.QOS_LEVEL_AT_MOST_ONCE);
+            Publish(telemetryTopic, JsonUtility.ToJson(msg), QosAtMostOnce);
         }
     }
 

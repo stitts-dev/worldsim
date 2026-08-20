@@ -1,7 +1,6 @@
 using System;
 using UnityEngine;
 using WorldSim.Core;
-using uPLibrary.Networking.M2Mqtt.Messages;
 
 namespace WorldSim.CatBasement
 {
@@ -27,6 +26,9 @@ namespace WorldSim.CatBasement
         [Header("Aiming (rough - real aiming is phase 2 / issue #7)")]
         public Transform floorReference; // a plane/quad whose localScale spans the room footprint
 
+        /// <summary>Clearance above the floor surface so effects don't z-fight it.</summary>
+        const float SurfaceLift = 0.02f;
+
         AudioSource _audio;
 
         // debug overlay state (OnGUI, per spec)
@@ -50,7 +52,7 @@ namespace WorldSim.CatBasement
             bridge.OnMessage += HandleMessage;
             // MqttBridge remembers subscriptions across reconnects, so a single
             // call here is enough regardless of current connection state.
-            bridge.Subscribe(fireTopic, MqttMsgBase.QOS_LEVEL_AT_LEAST_ONCE);
+            bridge.Subscribe(fireTopic, MqttBridge.QosAtLeastOnce);
         }
 
         void OnDisable()
@@ -117,7 +119,11 @@ namespace WorldSim.CatBasement
             Vector3 floorSize = floorReference.localScale;
             float x = (target[0] - 0.5f) * floorSize.x;
             float z = (0.5f - target[1]) * floorSize.z; // frame origin is top-left, flip for world z
-            return floorReference.position + new Vector3(x, 0f, z);
+            // Sit on the floor's top face, not its pivot - the floor is a flattened
+            // cube, so its pivot is half a thickness below the walkable surface and
+            // effects placed there are hidden inside the geometry.
+            float y = floorReference.position.y + floorSize.y * 0.5f + SurfaceLift;
+            return new Vector3(floorReference.position.x + x, y, floorReference.position.z + z);
         }
 
         void NotifySquattingCats(Vector3 worldTarget)
@@ -138,7 +144,7 @@ namespace WorldSim.CatBasement
                 detail = detail
             };
             string json = JsonUtility.ToJson(ack);
-            bridge.Publish(ackTopic, json, MqttMsgBase.QOS_LEVEL_AT_LEAST_ONCE);
+            bridge.Publish(ackTopic, json, MqttBridge.QosAtLeastOnce);
             _lastAckDebug = json;
         }
 

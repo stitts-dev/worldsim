@@ -1,183 +1,148 @@
-# SETUP — editor-side assembly
+# SETUP — bringing the sim up
 
-Everything that can be authored as text has been (scripts, asmdefs). What's
-left needs the Unity editor: package install, scene assembly, NavMesh bake,
-wiring components together in the inspector. Read `docs/design.md` and
-`docs/contract-catsentry-v1.md` first if anything here is ambiguous — both are
-self-contained specs.
+The whole project is authored as text, including the scene. Scene assembly, URP
+setup and the NavMesh bake are done by an editor script
+(`Assets/Editor/CatBasementSceneBuilder.cs`) rather than by hand, so a fresh
+clone reaches a runnable scene with one command.
 
-## 1. Install Unity 6 LTS
+Read `docs/design.md` and `docs/contract-catsentry-v1.md` first if anything
+here is ambiguous — both are self-contained specs.
 
-- Unity Hub → Installs → Install Editor → **Unity 6000.0.x LTS**.
-- Modules: just the default Windows Build Support is fine (no mobile/console
-  targets needed for this project).
+## 1. Unity 6 LTS
 
-## 2. Open the project
-
-- Unity Hub → Open → point at the repo root (`worldsim/`, the folder with
-  `Assets/`).
-- First open will be slow — Unity imports every script, generates `.meta`
-  files for everything under `Assets/WorldSim/` (none exist yet, this repo was
-  authored without the editor), and does an initial domain reload.
-- **Expect compile errors on first open** until step 3 (M2Mqtt) is done — the
-  `using uPLibrary.Networking.M2Mqtt;` lines in `MqttBridge.cs` and
-  `VirtualTurret.cs` won't resolve until the package is installed. That's
-  expected, not a sign anything else is broken.
-
-## 3. Confirm URP
-
-If the project wasn't created from a URP template:
-- `Window → Package Manager` → install **Universal RP**.
-- `Edit → Project Settings → Graphics` → set the Scriptable Render Pipeline
-  Asset to a URP asset (create one via `Assets → Create → Rendering → URP
-  Asset (with Universal Renderer)` if none exists).
-- `Edit → Render Pipeline → Universal Render Pipeline → Upgrade Project
-  Materials to UniversalRP Materials` if any default/legacy materials get used
-  for the room geometry.
-
-## 4. Install NuGetForUnity + M2Mqtt
-
-1. `Window → Package Manager → + → Add package from git URL…` and add:
-   `https://github.com/GlitchEnzo/NuGetForUnity.git?path=/src/NuGetForUnity`
-   (or import the latest NuGetForUnity `.unitypackage` release if you prefer —
-   either way you end up with a `NuGet → Manage NuGet Packages` menu).
-2. `NuGet → Manage NuGet Packages` → search **M2Mqtt** → Install.
-   This drops the M2Mqtt DLL under `Assets/Packages/M2Mqtt.<version>/lib/...`
-   (already covered by `.gitignore` — the DLL itself isn't committed, only its
-   `.meta`).
-3. Let Unity recompile. If `MqttBridge.cs` / `VirtualTurret.cs` still can't
-   find `uPLibrary.Networking.M2Mqtt`:
-   - Check the DLL's importer (`Assets/Packages/M2Mqtt.../M2Mqtt.dll` → click
-     it in the Project window → Inspector) has **Any Platform** ticked.
-   - If NuGetForUnity generated its own `.asmdef` for the DLL (some versions
-     do, to avoid duplicate-reference warnings), open
-     `Assets/WorldSim/Core/WorldSim.Core.asmdef` and add that assembly's name
-     to its `references` array (Inspector → Assembly Definition References →
-     `+` is easier than hand-editing the JSON).
-
-## 5. Scene assembly — `CatBasement.unity`
-
-Create the scene at `Assets/WorldSim/Scenarios/CatBasement/CatBasement.unity`
-(new scene, URP template).
-
-**Room** — floor plane + 4 walls, ~6 m x 4 m footprint:
-- Floor: a `Plane` (10x10 units default → scale to ~0.6 x 1 x 0.4, or a Cube
-  flattened to Y≈0.1, whichever is easier to eyeball at 6x4 m) tagged/named
-  `Floor`.
-- 4 walls: scaled cubes standing on the floor edges, ~2.5 m tall. Dim warm
-  lighting (a couple of point/spot lights, low intensity, warm color temp —
-  "basement", not "showroom"). Primitive geometry + simple materials, no need
-  for anything fancier.
-
-**Litterboxes** — 3x, along one wall:
-- Open-top box look: a shallow cube (~40x30 cm footprint, ~15 cm tall) with a
-  slightly larger flat "rim" cube around the top edge, sand-colored material
-  on the top face/fill. Space them along the wall with a bit of gap.
-- These define the "problem zone" the cats squat near — see CatAgent wiring
-  below.
-
-**Camera mount**:
-- Empty GameObject in the corner opposite the litterboxes, ~2-2.2 m up,
-  angled down to frame the boxes + the floor area in front of them (like a
-  real security cam).
-- Add a `Camera` component. Tag it `MainCamera` (CatAgent's hotkey-P "nearest
-  cat" logic uses `Camera.main` as its reference point — if nothing is tagged
-  MainCamera it falls back to world origin, which still works for a 6x4 m
-  room but tagging the security cam is the correct match to the design intent).
-- Add `FrameStreamer` (from `Assets/WorldSim/Core/FrameStreamer.cs`). Leave
-  defaults (port 8089, q70, 12 fps) unless you have a reason not to — they're
-  the contract values. Resolution (1280x720) is fixed in code, not an
-  Inspector field, so there's nothing to set there.
-
-**Turret mount**:
-- Empty GameObject near the ceiling, roughly overlooking the litterboxes.
-- Add an `AudioSource` (required component) — set a chirp `AudioClip` if you
-  have one handy, otherwise leave it null (VirtualTurret null-checks it and
-  just skips the sound).
-- Add two `ParticleSystem` children (or reuse one for both, your call):
-  one for the "sound" ring effect, one for the "air" puff. Simple built-in
-  particle shapes are fine — a flat expanding ring for sound, a white burst
-  for air.
-- Add `VirtualTurret` (from `Assets/WorldSim/Scenarios/CatBasement/VirtualTurret.cs`).
-  Wire `ringEffect` / `puffEffect` / `chirpClip` in the inspector. Set
-  `floorReference` to the Floor object (its `localScale` is used to map
-  normalized `target` coords onto the room footprint — rough, phase-2 does
-  real aiming, see issue #7).
-
-**MQTT bridge**:
-- One GameObject (e.g. "Managers" or directly on the turret mount) with
-  `MqttBridge` (from `Assets/WorldSim/Core/MqttBridge.cs`). Defaults
-  (`localhost:1883`) match the contract. `VirtualTurret.bridge` auto-finds it
-  via `FindFirstObjectByType` if left unassigned, but wiring it explicitly in
-  the inspector is one click and avoids relying on that fallback.
-
-**Cats** — 3x capsule (or a free low-poly cat model if you grab one trivially;
-don't go hunting for one):
-- Capsule scaled to roughly 45 cm long x 25 cm tall, one each in black,
-  orange, gray albedo (just different `Material` colors — future per-cat-ID
-  work reads these, nothing more is needed now).
-- Each needs: `NavMeshAgent`, `WanderAgent` (from
-  `Assets/WorldSim/Core/Agents/WanderAgent.cs`), `CatAgent` (from
-  `Assets/WorldSim/Scenarios/CatBasement/CatAgent.cs`).
-- `WanderAgent.boundsCenter` / `boundsExtents` → roughly the room's walkable
-  floor area (so cats don't try to wander into walls — NavMesh will clip them
-  back onto the mesh regardless, but tighter bounds means less time spent
-  pathing at edges).
-- `CatAgent.problemZoneCenter` → an empty Transform placed just in front of
-  the litterboxes (1-2 m off, per design.md). `CatAgent.farCorner` → an empty
-  Transform in the corner diagonally opposite the boxes (flee target).
-- Defaults for trigger/squat timing (60-120 s random trigger, 8 s squat) match
-  the spec — no need to touch unless testing faster cycles.
-
-**NavMesh**:
-- `Window → AI → Navigation` (or the Unity 6 equivalent under `AI Navigation`
-  package — install it from Package Manager if the menu isn't there).
-- Mark the floor as `Navigation Static`, leave walls/litterboxes as obstacles
-  (or also static, so the mesh routes around them).
-- Bake. Confirm the walkable area covers the room floor including in front of
-  the litterboxes.
-
-## 6. mosquitto (test machine)
-
+```bash
+brew install --cask unity-hub
 ```
-# Windows (choco)
-choco install mosquitto
 
-# or just run the default config, no auth needed (matches the contract):
-mosquitto -v
+Then install the editor this project is pinned to
+(`ProjectSettings/ProjectVersion.txt` — currently **6000.0.82f1**):
+
+```bash
+"/Applications/Unity Hub.app/Contents/MacOS/Unity Hub" -- --headless install --version 6000.0.82f1 --architecture arm64
 ```
-Confirm it's listening on `1883` (default). No config file changes needed —
-contract is explicitly "no auth (LAN/tailnet only)".
 
-## 7. Press-Play acceptance checklist
+## 2. Activate a Unity licence
 
-Straight from `docs/design.md` criteria 1-7:
+**Required before anything below runs.** Batch mode fails with `No valid Unity
+Editor license found. Please activate your license.` until one exists. Personal
+is free and sufficient here.
 
-1. [ ] Open project in Unity 6, press Play — no console errors, basement scene runs.
-2. [ ] `http://localhost:8089/stream` plays live in VLC/browser; `/snapshot` returns a JPEG.
-3. [ ] 3 cats wander; pressing **P** makes one walk beside the boxes and squat ~8 s.
-4. [ ] With mosquitto running: `mosquitto_sub -t 'catsentry/#' -v` shows `catsentry/telemetry` heartbeats every ~10 s.
-5. [ ] `mosquitto_pub -t catsentry/deterrent/fire -m '{"ts":"2026-08-19T00:00:00Z","level":"sound","target":[0.5,0.5],"duration_ms":1000,"reason":"manual test"}'`
-       → chirp + ring in sim, `catsentry/deterrent/ack` published, a squatting cat flees (fire while one is mid-squat, or use hotkey P then fire quickly).
-6. [ ] Same with `"level":"air"` → puff particle + ack.
-7. [ ] Streaming + MQTT survive 10+ minutes without leak/disconnect; stop mosquitto and restart it mid-run to confirm MqttBridge reconnects and heartbeats resume.
+Open Unity Hub, sign in to a Unity account, and accept the Personal licence
+under `Preferences → Licenses`. Hub writes it to
+`/Library/Application Support/Unity/licenses/`, and every batch-mode command
+below then works. Verify:
 
-## Known first-import friction (see also PR/commit notes)
+```bash
+ls /Library/Application\ Support/Unity/licenses/
+```
 
-- `http://+:8089/` binding can throw `HttpListenerException` (access denied)
-  if the editor isn't running elevated and no URL ACL is reserved.
-  `FrameStreamer` catches this and falls back to `http://localhost:8089/`
-  automatically (logged as a warning) — stream still works locally, but
-  something on another machine (e.g. the real cat-sentry detector) won't
-  reach it until you either run Unity as Administrator once, or reserve the
-  ACL yourself:
+## 3. Build the scene
+
+One batch-mode call resolves packages (URP 17.0.4 from the editor's own bundle,
+AI Navigation 2.0.14), compiles, creates the URP pipeline assets, assembles
+`CatBasement.unity`, bakes the NavMesh, and saves.
+
+```bash
+/Applications/Unity/Hub/Editor/6000.0.82f1/Unity.app/Contents/MacOS/Unity -batchmode -projectPath "$PWD" -executeMethod WorldSim.EditorTools.CatBasementSceneBuilder.BuildFromBatch -quit -logFile build.log
+```
+
+Look for `CatBasementSceneBuilder: scene built and saved` in `build.log`. The
+script is idempotent — re-run it any time to rebuild the scene from source.
+Inside the editor the same thing is on the menu: **WorldSim → Build CatBasement
+Scene**.
+
+### What it builds
+
+- **Room** — 6 x 4 m floor, four walls, dim warm point lights, no skybox.
+- **Litterboxes** — three along the north wall, each a shell plus sand-colored
+  fill, marked non-walkable so cats route around them.
+- **Security camera** — corner opposite the boxes, ~2.15 m up, angled down over
+  the boxes and the floor in front of them. Tagged `MainCamera`, carries
+  `FrameStreamer` at the contract defaults (port 8089, 1280x720, q70, 12 fps).
+- **Turret** — near the ceiling overlooking the boxes, with an `AudioSource`
+  (procedural `Audio/chirp.wav`), a ring particle system for `sound`, a puff for
+  `air`, and `VirtualTurret` wired to the bridge and the floor.
+- **Managers** — `MqttBridge`, pointed at localhost:1883.
+- **Cats** — three capsules (black, orange, gray) with `NavMeshAgent`,
+  `WanderAgent` bounded to the walkable floor, and `CatAgent` pointed at a
+  problem-zone marker in front of the boxes and a far-corner flee target.
+
+## 4. mosquitto
+
+```bash
+brew install mosquitto
+```
+
+Run it in the foreground — no config needed, the contract is explicitly "no
+auth (LAN/tailnet only)":
+
+```bash
+/opt/homebrew/opt/mosquitto/sbin/mosquitto -p 1883 -v
+```
+
+## 5. Press Play, then run the acceptance harness
+
+Open the project, open
+`Assets/WorldSim/Scenarios/CatBasement/CatBasement.unity`, press Play.
+
+`tools/acceptance.py` checks design.md criteria 2, 4, 5 and 6 from outside
+Unity, over exactly the surface the real cat-sentry detector uses. No
+third-party packages — MJPEG over `http.client`, MQTT over a small built-in
+client.
+
+```bash
+python3 tools/acceptance.py
+```
+
+Add the criterion-7 soak for the long run:
+
+```bash
+python3 tools/acceptance.py --soak 1800
+```
+
+The remaining criteria are visual and stay manual:
+
+1. [ ] Play with no console errors, basement scene runs (criterion 1).
+2. [ ] Three cats wander; pressing **P** sends the nearest one to squat beside
+       the boxes for ~8 s (criterion 3).
+3. [ ] Fire while a cat is mid-squat — hotkey **P**, then run the harness or
+       `mosquitto_pub` — and confirm it cancels the squat and flees (part of
+       criteria 5 and 6).
+
+To poke by hand instead:
+
+```bash
+mosquitto_sub -t 'catsentry/#' -v
+```
+
+```bash
+mosquitto_pub -t catsentry/deterrent/fire -m '{"ts":"2026-08-19T00:00:00Z","level":"sound","target":[0.5,0.5],"duration_ms":1000,"reason":"manual test"}'
+```
+
+## Notes on the build
+
+- **No NuGet, no MQTT package.** `MqttClientLite.cs` is a ~200-line MQTT 3.1.1
+  client (connect, subscribe, publish QoS 0/1, ping). M2Mqtt was dropped
+  because it ships no netstandard target: its net45 assembly fails to compile
+  under Unity's default .NET Standard 2.1 profile (CS0012 on mscorlib 4.0.0.0)
+  and only builds when the project's API Compatibility Level is switched to
+  .NET Framework — a setting that cannot be applied before Unity's first script
+  compile, which leaves a fresh clone unbuildable without hand intervention.
+  `docs/design.md` leaves the client to the implementer, "smallest working
+  option wins". Same reasoning as the hand-rolled MJPEG server.
+- **`http://+:8089/` binding** can be refused without elevation or a URL ACL.
+  `FrameStreamer` catches that and falls back to `http://localhost:8089/` with a
+  warning — the stream still works locally, but another machine (the real
+  detector) will not reach it. macOS generally binds fine; on Windows reserve
+  the ACL once:
   ```
   netsh http add urlacl url=http://+:8089/ user=Everyone
   ```
-  Also check Windows Firewall allows inbound TCP 8089 if testing from another
-  device on the tailnet/LAN.
-- `AsyncGPUReadback` failing on a given GPU/driver combo isn't a compile
-  error, it's a runtime fallback — `FrameStreamer` will log a warning and
-  switch to `Texture2D.ReadPixels` automatically. If you see that warning
-  immediately on Play, it's not a bug to chase, it's the designed fallback
-  path working.
+  Check the firewall allows inbound TCP 8089 when testing across the tailnet.
+- **`AsyncGPUReadback` warnings on Play** are not a bug to chase.
+  `FrameStreamer` logs one and switches to `Texture2D.ReadPixels` — the designed
+  fallback working.
+- **NavMesh bake agent size** is the default Humanoid (radius 0.5), which erodes
+  the walkable area to roughly 5 x 3 m inside the 6 x 4 m room. `WanderAgent`
+  bounds sit inside that on purpose, and the cats' squat spot in front of the
+  boxes lands within it.
