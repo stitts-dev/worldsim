@@ -20,7 +20,8 @@ detection service watches the stream and fires the virtual turret over MQTT.
 
 ## Status
 
-Spec complete, implementation starting. Unity 6 LTS, URP.
+Scripts authored (Core + CatBasement, `Assets/WorldSim/`), scene assembly
+pending — see [SETUP.md](SETUP.md). Unity 6 LTS, URP.
 
 ## Docs
 
