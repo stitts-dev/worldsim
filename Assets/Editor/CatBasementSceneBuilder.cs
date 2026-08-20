@@ -180,6 +180,15 @@ namespace WorldSim.EditorTools
             var managers = new GameObject("Managers");
             var bridge = managers.AddComponent<MqttBridge>();
 
+            // Control surface for an external test harness (pigame's unity engine):
+            // step/reset/inspect/capture on its own port. Its own root object, not a
+            // component on Managers: it survives the scene reload that /reset performs,
+            // and the scene's copy arriving as a duplicate has to be destroyable
+            // without taking the MQTT bridge down with it.
+            var controlGo = new GameObject("SimControl");
+            var control = controlGo.AddComponent<SimControl>();
+            control.captureCamera = streamCam;
+
             // Decision feed, rendered as world-space text parented to the streaming
             // camera so it lands in the MJPEG frames themselves. IMGUI and
             // screen-space canvases do not appear in a RenderTexture, which is why

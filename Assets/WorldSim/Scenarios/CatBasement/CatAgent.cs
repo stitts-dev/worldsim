@@ -27,7 +27,7 @@ namespace WorldSim.CatBasement
     /// cat to a far corner - that's what makes the closed-loop demo visible.
     /// </summary>
     [RequireComponent(typeof(WanderAgent))]
-    public class CatAgent : MonoBehaviour
+    public class CatAgent : MonoBehaviour, ISimInspectable
     {
         [Header("Misbehavior timing")]
         public float minTriggerSec = 60f;
@@ -738,6 +738,29 @@ namespace WorldSim.CatBasement
                 in_box = inBox
             };
             bridge.Publish(groundTruthTopic, JsonUtility.ToJson(msg), MqttBridge.QosAtMostOnce);
+        }
+
+        // ---- inspect ----
+
+        /// <summary>What a gate asserts against to prove a behavior actually happened.
+        /// Position is here deliberately: "three cats exist" is a count, and a count
+        /// cannot prove a cat walked to a litterbox. Anything a test needs to check has
+        /// to be a field, or the assertion is unverifiable by construction.</summary>
+        public string InspectJson()
+        {
+            Vector3 p = transform.position;
+            var sb = new System.Text.StringBuilder();
+            sb.Append('{');
+            sb.Append("\"name\":").Append(SimControl.Quote(gameObject.name)).Append(',');
+            sb.Append("\"type\":\"cat\",");
+            sb.Append("\"behavior\":").Append(SimControl.Quote(CurrentBehavior)).Append(',');
+            sb.Append("\"in_box\":").Append(IsUsingBox ? "true" : "false").Append(',');
+            sb.Append("\"squatting\":").Append(IsSquatting ? "true" : "false").Append(',');
+            sb.Append("\"x\":").Append(SimControl.Fmt(p.x)).Append(',');
+            sb.Append("\"y\":").Append(SimControl.Fmt(p.y)).Append(',');
+            sb.Append("\"z\":").Append(SimControl.Fmt(p.z));
+            sb.Append('}');
+            return sb.ToString();
         }
     }
 

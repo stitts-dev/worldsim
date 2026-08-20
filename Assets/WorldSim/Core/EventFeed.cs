@@ -273,7 +273,7 @@ namespace WorldSim.Core
                 Text = tm,
                 BasePos = worldPos,
                 BaseColor = c,
-                Born = Time.unscaledTime,
+                Born = Time.time,
                 Lifetime = Mathf.Max(0.2f, pingLifetimeSec)
             });
         }
@@ -309,7 +309,7 @@ namespace WorldSim.Core
 
         bool IsDuplicate(string topic, string payload)
         {
-            float now = Time.unscaledTime;
+            float now = Time.time;
             bool dup = _lastMessageTime >= 0f
                        && now - _lastMessageTime < DuplicateWindowSec
                        && string.Equals(topic, _lastTopic, StringComparison.Ordinal)
@@ -435,13 +435,13 @@ namespace WorldSim.Core
             // a dozen overlapping labels and their GameObjects inside the capture
             // loop. The throttle covers a detector that repeats a transition.
             if (!IsPingWorthy(msg.type)) return;
-            if (Time.unscaledTime < _nextDetectPing) return;
+            if (Time.time < _nextDetectPing) return;
             if (msg.bbox == null || msg.bbox.Length < 2) return;
 
             Vector3 world;
             if (TryNormalizedToWorld(msg.bbox, out world))
             {
-                _nextDetectPing = Time.unscaledTime + DetectPingCooldownSec;
+                _nextDetectPing = Time.time + DetectPingCooldownSec;
                 Ping(world + Vector3.up * 0.2f, msg.type, LogKind.Detect);
             }
         }
@@ -539,9 +539,9 @@ namespace WorldSim.Core
                 if (cats == null)
                 {
                     // AllCats missing: fall back to a periodic scene scan.
-                    if (Time.unscaledTime >= _catFallbackRefresh)
+                    if (Time.time >= _catFallbackRefresh)
                     {
-                        _catFallbackRefresh = Time.unscaledTime + 2f;
+                        _catFallbackRefresh = Time.time + 2f;
                         _catFallback = FindObjectsByType(_catType, FindObjectsSortMode.None);
                     }
                     cats = _catFallback;
@@ -625,7 +625,7 @@ namespace WorldSim.Core
             else
             {
                 _misbehavingCount = Mathf.Max(0, _misbehavingCount - 1);
-                _misbehaviorEndedAt = Time.unscaledTime;
+                _misbehaviorEndedAt = Time.time;
                 if (_misbehavingCount == 0 && !_firedThisEpisode)
                 {
                     _misses++;
@@ -642,7 +642,7 @@ namespace WorldSim.Core
             // detector needs dwell time before it can be confident, so demanding
             // it fire strictly inside the squat would penalise correct caution.
             bool inGrace = _misbehaviorEndedAt >= 0f &&
-                           Time.unscaledTime - _misbehaviorEndedAt <= scoreGraceSec;
+                           Time.time - _misbehaviorEndedAt <= scoreGraceSec;
 
             if (_misbehavingCount > 0 || inGrace)
             {
@@ -1192,7 +1192,7 @@ namespace WorldSim.Core
                 Text = tm,
                 BasePos = go.transform.position,
                 BaseColor = c,
-                Born = Time.unscaledTime,
+                Born = Time.time,
                 Lifetime = Mathf.Max(0.2f, pingLifetimeSec)
             });
         }
@@ -1204,7 +1204,7 @@ namespace WorldSim.Core
                 ActivePing p = _pings[i];
                 if (p.Root == null) { _pings.RemoveAt(i); continue; }
 
-                float t = (Time.unscaledTime - p.Born) / p.Lifetime;
+                float t = (Time.time - p.Born) / p.Lifetime;
                 if (t >= 1f) { DestroyPingAt(i); continue; }
 
                 p.Root.position = p.BasePos + Vector3.up * (pingRiseMeters * t);
