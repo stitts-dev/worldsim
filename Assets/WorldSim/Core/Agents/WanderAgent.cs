@@ -1,5 +1,6 @@
 using UnityEngine;
 using UnityEngine.AI;
+using WorldSim.Core;
 
 namespace WorldSim.Core.Agents
 {
@@ -50,7 +51,7 @@ namespace WorldSim.Core.Agents
                 return;
             }
 
-            if (!_agent.pathPending && _agent.remainingDistance <= _agent.stoppingDistance)
+            if (_agent.HasArrived())
                 StartIdle();
         }
 
@@ -64,7 +65,7 @@ namespace WorldSim.Core.Agents
         {
             _idling = false;
             Vector3 point = RandomPointInBounds();
-            if (NavMesh.SamplePosition(point, out NavMeshHit hit, 2f, NavMesh.AllAreas))
+            if (_agent.isOnNavMesh && NavMesh.SamplePosition(point, out NavMeshHit hit, 2f, NavMesh.AllAreas))
                 _agent.SetDestination(hit.position);
         }
 

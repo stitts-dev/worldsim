@@ -15,7 +15,7 @@ namespace WorldSim.Core
     /// Per docs/contract-catsentry-v1.md: 1280x720, ~q70, 10-15 fps, port 8089.
     /// HttpListener runs on a background accept thread; each client gets its own
     /// thread. Those threads only ever touch a locked byte[] buffer - never Unity
-    /// API - so no MainThreadDispatcher hop is needed here.
+    /// API - so no main-thread hop is needed here.
     /// </summary>
     [RequireComponent(typeof(Camera))]
     public class FrameStreamer : MonoBehaviour
@@ -24,10 +24,10 @@ namespace WorldSim.Core
         public int port = 8089;
 
         [Header("Frame")]
-        public int width = 1280;
-        public int height = 720;
+        public const int Width = 1280;
+        public const int Height = 720;
         [Range(1, 100)] public int jpegQuality = 70;
-        [Range(1, 30)] public int targetFps = 12; // 10-15 fps per contract
+        [Range(10, 15)] public int targetFps = 12; // 10-15 fps per contract
 
         Camera _camera;
         RenderTexture _renderTexture;
@@ -66,7 +66,7 @@ namespace WorldSim.Core
             _captureInterval = 1f / Mathf.Max(1, targetFps);
             _timeSinceCapture = 0f;
 
-            _renderTexture = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
+            _renderTexture = new RenderTexture(Width, Height, 24, RenderTextureFormat.ARGB32)
             {
                 name = "FrameStreamer_RT"
             };
@@ -129,7 +129,7 @@ namespace WorldSim.Core
             try
             {
                 if (_asyncTex == null)
-                    _asyncTex = new Texture2D(width, height, TextureFormat.RGBA32, false);
+                    _asyncTex = new Texture2D(Width, Height, TextureFormat.RGBA32, false);
 
                 // RT is ARGB32 -> readback into an RGBA32 Texture2D is the standard
                 // AsyncGPUReadback pairing; LoadRawTextureData avoids needing
@@ -150,11 +150,11 @@ namespace WorldSim.Core
         void CaptureWithReadPixels()
         {
             if (_fallbackTex == null)
-                _fallbackTex = new Texture2D(width, height, TextureFormat.RGB24, false);
+                _fallbackTex = new Texture2D(Width, Height, TextureFormat.RGB24, false);
 
             RenderTexture prevActive = RenderTexture.active;
             RenderTexture.active = _renderTexture;
-            _fallbackTex.ReadPixels(new Rect(0, 0, width, height), 0, 0);
+            _fallbackTex.ReadPixels(new Rect(0, 0, Width, Height), 0, 0);
             _fallbackTex.Apply(false);
             RenderTexture.active = prevActive;
 

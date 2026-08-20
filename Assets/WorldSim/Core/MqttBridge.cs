@@ -12,9 +12,9 @@ namespace WorldSim.Core
     /// Thin MonoBehaviour wrapper around M2Mqtt: connect with backoff reconnect,
     /// publish/subscribe JSON string payloads, periodic telemetry heartbeat.
     ///
-    /// <see cref="OnMessage"/> always fires on the main thread (marshaled via
-    /// MainThreadDispatcher) so subscribers (e.g. VirtualTurret) can touch Unity
-    /// API directly without worrying about M2Mqtt's receiver thread.
+    /// <see cref="OnMessage"/> always fires on the main thread (marshaled via the
+    /// SynchronizationContext captured in Awake) so subscribers (e.g. VirtualTurret)
+    /// can touch Unity API directly without worrying about M2Mqtt's receiver thread.
     /// </summary>
     public class MqttBridge : MonoBehaviour
     {
@@ -38,14 +38,16 @@ namespace WorldSim.Core
 
         MqttClient _client;
         string _clientId;
+        SynchronizationContext _mainCtx;
 
         // Topics we want subscribed, replayed on every (re)connect - M2Mqtt doesn't
         // give us a persistent session here, so re-subscribing ourselves is simplest.
-        readonly List<string> _subscribedTopics = new List<string>();
-        readonly List<byte> _subscribedQos = new List<byte>();
+        // Maps topic -> qos.
+        readonly Dictionary<string, byte> _subscriptions = new Dictionary<string, byte>();
         readonly object _subLock = new object();
 
         volatile bool _connecting;
+        volatile bool _stopping;
         float _reconnectDelay;
         float _reconnectTimer;
         float _heartbeatTimer;
@@ -54,15 +56,18 @@ namespace WorldSim.Core
         {
             _clientId = "worldsim-" + Guid.NewGuid().ToString("N").Substring(0, 8);
             _reconnectDelay = reconnectMinDelaySec;
+            _mainCtx = SynchronizationContext.Current;
         }
 
         void OnEnable()
         {
+            _stopping = false;
             TryConnect();
         }
 
         void OnDisable()
         {
+            _stopping = true;
             Disconnect();
         }
 
@@ -111,6 +116,18 @@ namespace WorldSim.Core
                 byte code = client.Connect(_clientId);
                 if (code == MqttMsgConnack.CONN_ACCEPTED)
                 {
+                    if (_stopping)
+                    {
+                        // OnDisable fired while we were blocked in Connect() - don't
+                        // adopt this client, just close it so its receiver thread
+                        // doesn't outlive Play-mode stop.
+                        client.MqttMsgPublishReceived -= HandlePublishReceived;
+                        client.ConnectionClosed -= HandleConnectionClosed;
+                        try { if (client.IsConnected) client.Disconnect(); } catch (Exception) { /* going away anyway */ }
+                        return;
+                    }
+
+                    if (_client != null) Disconnect();
                     _client = client;
                     _reconnectDelay = reconnectMinDelaySec; // reset backoff on success
                     ResubscribeAll();
@@ -162,9 +179,10 @@ namespace WorldSim.Core
         {
             lock (_subLock)
             {
-                if (_subscribedTopics.Contains(topic)) return;
-                _subscribedTopics.Add(topic);
-                _subscribedQos.Add(qos);
+                // ContainsKey, not TryAdd - keeps this on the Unity-supported .NET
+                // API surface rather than the newer Dictionary APIs.
+                if (_subscriptions.ContainsKey(topic)) return;
+                _subscriptions[topic] = qos;
             }
             if (IsConnected)
                 _client.Subscribe(new[] { topic }, new[] { qos });
@@ -174,8 +192,12 @@ namespace WorldSim.Core
         {
             lock (_subLock)
             {
-                if (_subscribedTopics.Count == 0) return;
-                _client.Subscribe(_subscribedTopics.ToArray(), _subscribedQos.ToArray());
+                if (_subscriptions.Count == 0) return;
+                var topics = new string[_subscriptions.Count];
+                var qosLevels = new byte[_subscriptions.Count];
+                _subscriptions.Keys.CopyTo(topics, 0);
+                _subscriptions.Values.CopyTo(qosLevels, 0);
+                _client.Subscribe(topics, qosLevels);
             }
         }
 
@@ -191,7 +213,7 @@ namespace WorldSim.Core
         {
             string topic = e.Topic;
             string payload = Encoding.UTF8.GetString(e.Message);
-            MainThreadDispatcher.Instance.Enqueue(() => OnMessage?.Invoke(topic, payload));
+            _mainCtx.Post(_ => OnMessage?.Invoke(topic, payload), null);
         }
 
         void PublishHeartbeat()

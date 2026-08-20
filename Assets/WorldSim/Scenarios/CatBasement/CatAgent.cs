@@ -86,7 +86,7 @@ namespace WorldSim.CatBasement
                     break;
 
                 case State.WalkingToZone:
-                    if (!_navAgent.pathPending && _navAgent.remainingDistance <= _navAgent.stoppingDistance)
+                    if (_navAgent.HasArrived())
                         BeginSquat();
                     break;
 
@@ -96,7 +96,7 @@ namespace WorldSim.CatBasement
                     break;
 
                 case State.Fleeing:
-                    if (!_navAgent.pathPending && _navAgent.remainingDistance <= _navAgent.stoppingDistance)
+                    if (_navAgent.HasArrived())
                         EndFlee();
                     break;
             }
@@ -121,7 +121,7 @@ namespace WorldSim.CatBasement
             _state = State.WalkingToZone;
 
             Vector3 target = ProblemZonePoint();
-            if (NavMesh.SamplePosition(target, out NavMeshHit hit, 2f, NavMesh.AllAreas))
+            if (_navAgent.isOnNavMesh && NavMesh.SamplePosition(target, out NavMeshHit hit, 2f, NavMesh.AllAreas))
                 _navAgent.SetDestination(hit.position);
         }
 
@@ -167,10 +167,13 @@ namespace WorldSim.CatBasement
                 ? farCorner.position
                 : transform.position + (transform.position - threatWorldPos).normalized * 5f;
 
-            if (NavMesh.SamplePosition(target, out NavMeshHit hit, 3f, NavMesh.AllAreas))
-                _navAgent.SetDestination(hit.position);
-            else
-                _navAgent.SetDestination(target);
+            if (_navAgent.isOnNavMesh)
+            {
+                if (NavMesh.SamplePosition(target, out NavMeshHit hit, 3f, NavMesh.AllAreas))
+                    _navAgent.SetDestination(hit.position);
+                else
+                    _navAgent.SetDestination(target);
+            }
         }
 
         void EndFlee()

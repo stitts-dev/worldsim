@@ -85,8 +85,9 @@ Create the scene at `Assets/WorldSim/Scenarios/CatBasement/CatBasement.unity`
   MainCamera it falls back to world origin, which still works for a 6x4 m
   room but tagging the security cam is the correct match to the design intent).
 - Add `FrameStreamer` (from `Assets/WorldSim/Core/FrameStreamer.cs`). Leave
-  defaults (port 8089, 1280x720, q70, 12 fps) unless you have a reason not to
-  — they're the contract values.
+  defaults (port 8089, q70, 12 fps) unless you have a reason not to — they're
+  the contract values. Resolution (1280x720) is fixed in code, not an
+  Inspector field, so there's nothing to set there.
 
 **Turret mount**:
 - Empty GameObject near the ceiling, roughly overlooking the litterboxes.
