@@ -27,6 +27,9 @@ crashlytics-build.properties
 Thumbs.db
 .DS_Store
 
-# NuGetForUnity restored packages keep their meta; caches out
-Assets/Packages/*/
-!Assets/Packages/*.meta
+# Batch-mode run logs (build.log, sync.log, scenebuild.log)
+*.log
+
+# tools/
+__pycache__/
+
