@@ -23,6 +23,7 @@ import time
 
 STREAM_HOST = "localhost"
 STREAM_PORT = 8089
+CONTROL_PORT = 8090
 BROKER_HOST = "localhost"
 BROKER_PORT = 1883
 
@@ -50,6 +51,7 @@ SOAK_CRITERION = ("C7", "stream and MQTT survive a long run")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
+EXIT_INFRA = 3
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
@@ -102,14 +104,32 @@ def coverage_line(roster=CRITERIA):
     return ", ".join(f"{code} {label}" for code, label in roster)
 
 
-def summarize(result):
+def sim_reachable(timeout=3):
+    """Liveness oracle for the FAIL-vs-INFRA call. /doctor on the control
+    surface is independent of both the stream path and the MQTT path, so it
+    answers "is the sim there at all" without reusing the thing that failed."""
+    try:
+        conn = http.client.HTTPConnection(STREAM_HOST, CONTROL_PORT, timeout=timeout)
+        conn.request("GET", "/doctor")
+        resp = conn.getresponse()
+        resp.read()
+        conn.close()
+        return resp.status == 200
+    except Exception:
+        return False
+
+
+def summarize(result, probe=None):
     """Print the per-criterion summary and return the process exit code."""
+    probe = probe or sim_reachable
     marks = {code: result.verdict(code) for code, _ in result.roster}
     failed = [code for code, mark in marks.items() if mark == "FAIL"]
+    infra = failed and not probe()
 
     print("\n=== summary ===", flush=True)
     for code, label in result.roster:
-        print(f"  [{marks[code]:5}] {code}  {label}: {result.note(code)}", flush=True)
+        mark = "INFRA" if infra and marks[code] == "FAIL" else marks[code]
+        print(f"  [{mark:5}] {code}  {label}: {result.note(code)}", flush=True)
 
     passed = sum(1 for m in marks.values() if m == "PASS")
     skipped = sum(1 for m in marks.values() if m == "SKIP")
@@ -119,6 +139,11 @@ def summarize(result):
         line += f", {skipped} skipped (not run, not passed)"
     print(f"=== {line} ===", flush=True)
 
+    if infra:
+        print(f"the control surface at {STREAM_HOST}:{CONTROL_PORT}/doctor did not answer - "
+              "the sim is not running, or its control surface is not enabled. "
+              "Treat the failures above as infrastructure, not product.", flush=True)
+        return EXIT_INFRA
     return EXIT_FAILED if failed else EXIT_OK
 
 

@@ -270,7 +270,7 @@ class RosterTest(unittest.TestCase):
                 self.assertEqual(r.verdict(code), "FAIL")
 
     def test_a_run_where_nothing_ran_at_all_fails(self):
-        self.assertNotEqual(acceptance.summarize(self.result()), 0)
+        self.assertNotEqual(acceptance.summarize(self.result(), probe=lambda: True), 0)
 
     def test_every_row_of_a_criterion_has_to_pass(self):
         r = self.result([("C2", True), ("C2", False)])
@@ -280,7 +280,7 @@ class RosterTest(unittest.TestCase):
         r = self.result([("C2", True), ("C5", True), ("C6", True)],
                         [("C4", "--skip-telemetry")])
         self.assertEqual(r.verdict("C4"), "SKIP")
-        self.assertEqual(acceptance.summarize(r), 0)
+        self.assertEqual(acceptance.summarize(r, probe=lambda: True), 0)
 
     def test_the_roster_is_criteria_not_rows(self):
         codes = [code for code, _ in acceptance.CRITERIA]
@@ -295,6 +295,34 @@ class RosterTest(unittest.TestCase):
         for code, label in acceptance.CRITERIA:
             self.assertIn(code, line)
             self.assertIn(label, line)
+
+
+class InfraTest(unittest.TestCase):
+    def failing(self):
+        r = acceptance.Result(acceptance.CRITERIA)
+        for code, _ in acceptance.CRITERIA:
+            r.add(code, "check", False, "ConnectionRefusedError")
+        return r
+
+    def test_a_sim_that_is_not_running_exits_with_the_infra_code(self):
+        self.assertEqual(acceptance.summarize(self.failing(), probe=lambda: False),
+                         acceptance.EXIT_INFRA)
+
+    def test_a_live_sim_failing_its_criteria_exits_one(self):
+        self.assertEqual(acceptance.summarize(self.failing(), probe=lambda: True), 1)
+
+    def test_a_clean_run_never_probes(self):
+        r = acceptance.Result(acceptance.CRITERIA)
+        for code, _ in acceptance.CRITERIA:
+            r.add(code, "check", True, "detail")
+        probes = []
+
+        def probe():
+            probes.append(1)
+            return True
+
+        self.assertEqual(acceptance.summarize(r, probe=probe), 0)
+        self.assertEqual(probes, [])
 
 
 if __name__ == "__main__":

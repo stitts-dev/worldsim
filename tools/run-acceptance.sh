@@ -7,7 +7,9 @@
 # for the MJPEG stream to answer, runs tools/acceptance.py over exactly the
 # surface the real cat-sentry detector uses, and tears the editor down again.
 #
-# Exit code is the harness's own: 0 all checks passed, 1 something failed.
+# Exit code is the harness's own: 0 every covered criterion passed, 1 a
+# criterion failed, 3 the sim could not be reached at all. (2 is this script's
+# own setup failures - no Unity, no mosquitto, an editor already running.)
 # Any argument is forwarded to acceptance.py (e.g. --soak 1800).
 #
 #   ./tools/run-acceptance.sh
