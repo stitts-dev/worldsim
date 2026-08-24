@@ -180,7 +180,7 @@ namespace WorldSim.EditorTools
             var managers = new GameObject("Managers");
             var bridge = managers.AddComponent<MqttBridge>();
 
-            // Control surface for an external test harness (pigame's unity engine):
+            // Control surface for the external Pi Unity test harness:
             // step/reset/inspect/capture on its own port. Its own root object, not a
             // component on Managers: it survives the scene reload that /reset performs,
             // and the scene's copy arriving as a duplicate has to be destroyable

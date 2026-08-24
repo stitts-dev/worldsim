@@ -20,6 +20,8 @@ UNITY="/Applications/Unity/Hub/Editor/6000.0.82f1/Unity.app/Contents/MacOS/Unity
 MOSQUITTO="/opt/homebrew/opt/mosquitto/sbin/mosquitto"
 STREAM_URL="http://localhost:8089/snapshot"
 RUN_LOG="$REPO/autoplay.log"
+SCENARIO="$REPO/tools/scenarios/cat-basement-smoke.json"
+SCENE="$(python3 "$REPO/tools/pi_unity.py" "$SCENARIO" --show scene)" || exit 2
 
 # How long to wait for the editor to compile, open the scene and start serving.
 # A cold library import is slow; a warm one is well under a minute.
@@ -72,7 +74,8 @@ if pgrep -f "Unity.app/Contents/MacOS/Unity.*$REPO" >/dev/null; then
 fi
 
 log "launching Unity with -autoplay (log: $RUN_LOG)"
-"$UNITY" -projectPath "$REPO" -autoplay -logFile "$RUN_LOG" &
+: >"$RUN_LOG" || { echo "cannot write Unity log at $RUN_LOG" >&2; exit 2; }
+"$UNITY" -projectPath "$REPO" -autoplay -scene "$SCENE" -logFile "$RUN_LOG" &
 UNITY_PID=$!
 
 log "waiting for the stream on $STREAM_URL (up to ${BOOT_TIMEOUT_SEC}s)"
@@ -81,7 +84,11 @@ for _ in $(seq 1 "$BOOT_TIMEOUT_SEC"); do
   if ! kill -0 "$UNITY_PID" 2>/dev/null; then
     echo "Unity exited before it ever served a frame - see $RUN_LOG" >&2
     grep -E "error CS|Fatal|Aborted" "$RUN_LOG" | head -20 >&2
-    exit 1
+    wait "$UNITY_PID"
+    RESULT=$?
+    UNITY_PID=""
+    [[ "$RESULT" == "0" ]] && RESULT=1
+    exit "$RESULT"
   fi
   if curl -fsS --max-time 2 -o /dev/null "$STREAM_URL" 2>/dev/null; then
     booted=1
@@ -97,14 +104,23 @@ if [[ "$booted" != "1" ]]; then
 fi
 
 log "stream is live, running acceptance harness"
+python3 "$REPO/tools/test_pi_unity.py"
+PI_UNITY_RESULT=$?
+if [[ "$PI_UNITY_RESULT" != "0" ]]; then
+  exit "$PI_UNITY_RESULT"
+fi
+
 python3 "$REPO/tools/acceptance.py" "$@"
 RESULT=$?
 
 # Console errors are a criterion in their own right (design.md #1) and the
 # harness cannot see them from outside the process.
 log "Unity console errors during the run"
-if grep -E "^(.*)(error CS|NullReferenceException|Exception:)" "$RUN_LOG" | grep -v "^AutoPlay" | head -20; then
+ERRORS="$(grep -E "error CS|NullReferenceException|Exception:" "$RUN_LOG" | grep -v "^AutoPlay" | sed -n '1,20p')"
+if [[ -n "$ERRORS" ]]; then
+  printf '%s\n' "$ERRORS"
   echo "(errors above - criterion 1 is not met even if the harness passed)"
+  RESULT=1
 else
   echo "none"
 fi

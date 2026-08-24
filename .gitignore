@@ -32,4 +32,4 @@ Thumbs.db
 
 # tools/
 __pycache__/
-
+/artifacts/

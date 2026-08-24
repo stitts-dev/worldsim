@@ -435,6 +435,9 @@ namespace WorldSim.Core
 
             Job load = Dispatch(() =>
             {
+                // Reset must not inherit whether the previous run was playing. Pause
+                // before loading so frame-zero lifecycle state is identical every time.
+                SetPaused(true);
                 // Seed before the load so anything randomising in Awake/Start on the
                 // new scene draws from the seeded stream. Seeding afterwards would be
                 // too late for exactly the load-time state reset is supposed to fix.

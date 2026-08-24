@@ -20,8 +20,29 @@ detection service watches the stream and fires the virtual turret over MQTT.
 
 ## Status
 
-Scripts authored (Core + CatBasement, `Assets/WorldSim/`), scene assembly
-pending — see [SETUP.md](SETUP.md). Unity 6 LTS, URP.
+CatBasement is assembled and runnable. Unity 6 LTS, URP. The external control
+surface supports deterministic reset/step/inspect/capture on port 8090.
+
+## Pi Unity saved scenario
+
+Launch the scene named by a saved scenario, replay it, save the evidence, and
+close Unity:
+
+```bash
+./tools/run-pi-unity.sh tools/scenarios/cat-basement-smoke.json
+```
+
+To target an editor that is already in Play mode instead:
+
+```bash
+python3 tools/pi_unity.py tools/scenarios/cat-basement-smoke.json --output /tmp/cat-basement-smoke
+```
+
+The saved scenario replays the same seed twice, checks frame-zero and frame-120
+state, rejects nondeterministic runs, and writes `report.json` plus a PNG capture.
+Copy the JSON and change its `name`, `scene`, seed, and checkpoints to save a new
+prototype. The launcher and harness need no scenario-specific code.
+`tools/run-acceptance.sh` runs this gate before the existing MJPEG/MQTT checks.
 
 ## Docs
 

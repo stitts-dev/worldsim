@@ -1,0 +1,32 @@
+{
+  "name": "cat-basement-smoke",
+  "scene": "Assets/WorldSim/Scenarios/CatBasement/CatBasement.unity",
+  "url": "http://localhost:8090",
+  "seed": 12345,
+  "runs": 2,
+  "doctor": {
+    "engine": "unity",
+    "scene": "CatBasement",
+    "canCapture": true
+  },
+  "checkpoints": [
+    {
+      "advance": 0,
+      "expect": {
+        "frame": 0,
+        "simTime": 0,
+        "paused": true,
+        "entityCount": 3
+      }
+    },
+    {
+      "advance": 120,
+      "expect": {
+        "frame": 120,
+        "simTime": 2,
+        "paused": true,
+        "entityCount": 3
+      }
+    }
+  ]
+}
