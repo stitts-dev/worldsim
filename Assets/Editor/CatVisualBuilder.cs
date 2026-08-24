@@ -117,18 +117,43 @@ namespace WorldSim.EditorTools
             var frontLeg = new Vector3(0.040f, 0.0475f, 0.040f);
             var rearLeg = new Vector3(0.046f, 0.0475f, 0.046f);
             const float legY = 0.0505f;
+            const float pawY = 0.017f;
 
-            Cylinder("Leg_FL", t, new Vector3(-0.040f, legY, 0.078f), frontLeg, fur);
-            Cylinder("Leg_FR", t, new Vector3(0.040f, legY, 0.078f), frontLeg, fur);
-            Cylinder("Leg_RL", t, new Vector3(-0.050f, legY, -0.100f), rearLeg, fur);
-            Cylinder("Leg_RR", t, new Vector3(0.050f, legY, -0.100f), rearLeg, fur);
+            // Hip joint sits at the top cap of the leg cylinder, so swinging the
+            // pivot about X pivots the leg where a real one hinges instead of
+            // scything it through the middle. HipY is arithmetic off the two
+            // literals above - never a fourth number that could drift from them.
+            const float hipY = legY + 0.0475f;
 
-            var frontPaw = new Vector3(0.048f, 0.030f, 0.058f);
-            var rearPaw = new Vector3(0.052f, 0.030f, 0.060f);
-            Sphere("Paw_FL", t, new Vector3(-0.040f, 0.017f, 0.086f), frontPaw, accent);
-            Sphere("Paw_FR", t, new Vector3(0.040f, 0.017f, 0.086f), frontPaw, accent);
-            Sphere("Paw_RL", t, new Vector3(-0.050f, 0.017f, -0.093f), rearPaw, accent);
-            Sphere("Paw_RR", t, new Vector3(0.050f, 0.017f, -0.093f), rearPaw, accent);
+            BuildLeg("FL", t, fur, accent, -0.040f, 0.078f, hipY, legY, pawY, 0.086f, frontLeg, new Vector3(0.048f, 0.030f, 0.058f));
+            BuildLeg("FR", t, fur, accent, 0.040f, 0.078f, hipY, legY, pawY, 0.086f, frontLeg, new Vector3(0.048f, 0.030f, 0.058f));
+            BuildLeg("RL", t, fur, accent, -0.050f, -0.100f, hipY, legY, pawY, -0.093f, rearLeg, new Vector3(0.052f, 0.030f, 0.060f));
+            BuildLeg("RR", t, fur, accent, 0.050f, -0.100f, hipY, legY, pawY, -0.093f, rearLeg, new Vector3(0.052f, 0.030f, 0.060f));
+        }
+
+        /// <summary>
+        /// One leg: an unscaled Hip_* pivot at the hip joint with the shank and the
+        /// paw hanging off it at offsets measured from that joint. Child offsets are
+        /// computed by subtraction from the part's original position, so the leg
+        /// lands in exactly the world spot it occupied before the pivot existed -
+        /// CatVisualDump proves that, it is not asserted here.
+        ///
+        /// The pivot is deliberately left at unit scale and identity rotation: that
+        /// makes its rest transform the identity that CatBodyAnimator writes offsets
+        /// against, so zero animation amplitude reproduces this rig exactly.
+        /// </summary>
+        static void BuildLeg(string suffix, Transform t, Material fur, Material accent,
+            float x, float legZ, float hipY, float legY, float pawY, float pawZ,
+            Vector3 legScale, Vector3 pawScale)
+        {
+            var hip = new GameObject("Hip_" + suffix);
+            hip.transform.SetParent(t, false);
+            hip.transform.localPosition = new Vector3(x, hipY, legZ);
+            hip.transform.localRotation = Quaternion.identity;
+            hip.transform.localScale = Vector3.one;
+
+            Cylinder("Leg_" + suffix, hip.transform, new Vector3(0f, legY - hipY, 0f), legScale, fur);
+            Sphere("Paw_" + suffix, hip.transform, new Vector3(0f, pawY - hipY, pawZ - legZ), pawScale, accent);
         }
 
         static void BuildTorso(Transform t, Material fur, Material accent)
@@ -167,25 +192,43 @@ namespace WorldSim.EditorTools
             }
         }
 
+        // Base of the skull, just above and behind the Neck sphere at
+        // (0, 0.166, 0.106). Head yaw and pitch turn about this point, which is
+        // where a cat's atlas joint is - pivoting about the head's own centre
+        // instead would swing the muzzle in a visibly wrong arc.
+        static readonly Vector3 HeadPivotLocal = new Vector3(0f, 0.172f, 0.118f);
+
         static void BuildHead(Transform t, Material fur, Material accent, Material inner, Material eye, float earMul)
         {
-            Sphere("Head", t, new Vector3(0f, 0.186f, 0.152f), new Vector3(0.112f, 0.107f, 0.108f), fur);
-            Sphere("Muzzle", t, new Vector3(0f, 0.170f, 0.192f), new Vector3(0.062f, 0.048f, 0.055f), accent);
-            Sphere("Eye_L", t, new Vector3(-0.027f, 0.194f, 0.196f), new Vector3(0.014f, 0.014f, 0.014f), eye);
-            Sphere("Eye_R", t, new Vector3(0.027f, 0.194f, 0.196f), new Vector3(0.014f, 0.014f, 0.014f), eye);
+            // Unscaled, identity-rotation pivot for the same reason as Hip_*: its
+            // rest transform is the identity CatBodyAnimator layers offsets onto.
+            // The ears ride the head, so a head turn takes the ears with it and the
+            // ear pivots stay free for flicks alone.
+            var head = new GameObject("HeadPivot");
+            head.transform.SetParent(t, false);
+            head.transform.localPosition = HeadPivotLocal;
+            head.transform.localRotation = Quaternion.identity;
+            head.transform.localScale = Vector3.one;
+            Transform h = head.transform;
+            Vector3 o = HeadPivotLocal;
 
-            BuildEar("Ear_L", t, -1f, inner, fur, earMul);
-            BuildEar("Ear_R", t, 1f, inner, fur, earMul);
+            Sphere("Head", h, new Vector3(0f, 0.186f, 0.152f) - o, new Vector3(0.112f, 0.107f, 0.108f), fur);
+            Sphere("Muzzle", h, new Vector3(0f, 0.170f, 0.192f) - o, new Vector3(0.062f, 0.048f, 0.055f), accent);
+            Sphere("Eye_L", h, new Vector3(-0.027f, 0.194f, 0.196f) - o, new Vector3(0.014f, 0.014f, 0.014f), eye);
+            Sphere("Eye_R", h, new Vector3(0.027f, 0.194f, 0.196f) - o, new Vector3(0.014f, 0.014f, 0.014f), eye);
+
+            BuildEar("Ear_L", h, -1f, inner, fur, earMul, o);
+            BuildEar("Ear_R", h, 1f, inner, fur, earMul, o);
         }
 
-        static void BuildEar(string name, Transform t, float side, Material inner, Material fur, float earMul)
+        static void BuildEar(string name, Transform t, float side, Material inner, Material fur, float earMul, Vector3 originOffset)
         {
             // Pivot empty carries the pose at unit scale so the two cones can be
             // scaled independently without their offsets picking up the parent's
             // squash.
             var pivot = new GameObject(name);
             pivot.transform.SetParent(t, false);
-            pivot.transform.localPosition = new Vector3(side * 0.036f, 0.216f, 0.143f);
+            pivot.transform.localPosition = new Vector3(side * 0.036f, 0.216f, 0.143f) - originOffset;
             pivot.transform.localRotation = Quaternion.Euler(-8f, 0f, side * -14f);
             pivot.transform.localScale = Vector3.one;
 

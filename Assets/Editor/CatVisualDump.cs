@@ -23,8 +23,9 @@ namespace WorldSim.EditorTools
     ///     -executeMethod WorldSim.EditorTools.CatVisualDump.DumpFromBatch \
     ///     -logFile dump.log
     ///
-    /// Writes CatVisualDump.txt at the project root (gitignored build output; the
-    /// interesting artifact is the diff, not the file).
+    /// Writes CatVisualDump.txt at the project root. That file is committed on
+    /// purpose: re-running the dump overwrites it, so `git diff CatVisualDump.txt`
+    /// coming back empty after a rig change IS the proof that nothing moved.
     /// </summary>
     public static class CatVisualDump
     {
