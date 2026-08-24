@@ -8,8 +8,9 @@
 # surface the real cat-sentry detector uses, and tears the editor down again.
 #
 # Exit code is the harness's own: 0 every covered criterion passed, 1 a
-# criterion failed, 3 the sim could not be reached at all. (2 is this script's
-# own setup failures - no Unity, no mosquitto, an editor already running.)
+# criterion failed, 3 the sim could not be reached at all, 4 nothing failed but
+# a criterion was never exercised. (2 is this script's own setup failures - no
+# Unity, no mosquitto, an editor already running.)
 # Any argument is forwarded to acceptance.py (e.g. --soak 1800).
 #
 #   ./tools/run-acceptance.sh
@@ -147,6 +148,9 @@ log "Unity console errors during the run"
 # also swallowed "AutoPlay: could not enter Play mode - <exception>", which is
 # the one AutoPlay line this criterion exists to surface.
 ERRORS="$(grep -E "error CS|NullReferenceException|Exception:" "$RUN_LOG" | grep -v "^AutoPlay: entering Play mode" | sed -n '1,20p')"
+if [[ "$RESULT" == "4" ]]; then
+  echo "(the harness exited 4: nothing failed, but a criterion was never exercised)"
+fi
 if [[ -n "$ERRORS" ]]; then
   printf '%s\n' "$ERRORS"
   echo "(errors above - criterion 1 is not met even if the harness passed)"

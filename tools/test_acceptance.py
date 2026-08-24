@@ -237,7 +237,10 @@ class FireDrainTest(unittest.TestCase):
         # counted against the fire this run publishes.
         client = FakeMqtt([(ACK_TOPIC, ack())], [(ACK_TOPIC, ack())])
         result = acceptance.Result(acceptance.CRITERIA)
-        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client)
+        # prove_flee=False keeps this about the ack path alone - otherwise it
+        # would block waiting for a squat from a sim that is not running.
+        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+                              prove_flee=False)
         self.assertTrue(result.rows[0][2], result.rows[0][3])
         order = [entry[0] for entry in client.log]
         self.assertLess(order.index("messages"), order.index("publish"))
@@ -245,10 +248,133 @@ class FireDrainTest(unittest.TestCase):
     def test_a_duplicate_ack_after_the_fire_fails(self):
         client = FakeMqtt([], [(ACK_TOPIC, ack()), (ACK_TOPIC, ack())])
         result = acceptance.Result(acceptance.CRITERIA)
-        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client)
+        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+                              prove_flee=False)
         self.assertFalse(result.rows[0][2])
         self.assertIn("2 acks, expected 1", result.rows[0][3])
 
+
+
+class FleeTest(unittest.TestCase):
+    """The flee proof is the closed loop: a deterrent lands and the sim reacts.
+
+    Every case below is a way the check could pass while proving nothing, which
+    is the failure mode this whole harness has been fighting all session.
+    """
+
+    @staticmethod
+    def state(*cats):
+        return {"entities": [dict(c, type="cat") for c in cats]}
+
+    def test_it_waits_for_a_floor_squat_and_ignores_a_cat_using_a_box(self):
+        # IsSquatting covers box_use too. Firing at a cat correctly using a
+        # litterbox would prove the deterrent startles the NEGATIVE class.
+        reads = [
+            self.state({"name": "A", "behavior": "wander", "x": 0.0, "z": 0.0}),
+            self.state({"name": "B", "behavior": "box_use", "x": 1.0, "z": 1.0}),
+            self.state({"name": "C", "behavior": "misbehavior", "x": 2.0, "z": 2.0}),
+        ]
+        got = acceptance.wait_for_misbehaving_cat(
+            5, poll=0, read=lambda: reads.pop(0))
+        self.assertIsNotNone(got)
+        self.assertEqual(got["name"], "C")
+
+    def test_no_squat_in_the_window_returns_none(self):
+        got = acceptance.wait_for_misbehaving_cat(
+            0.05, poll=0.01,
+            read=lambda: self.state({"name": "A", "behavior": "wander", "x": 0, "z": 0}))
+        self.assertIsNone(got)
+
+    def test_a_cat_that_flees_and_moves_passes(self):
+        reads = [
+            self.state({"name": "A", "behavior": "misbehavior", "x": 0.0, "z": 0.0}),
+            self.state({"name": "A", "behavior": "flee", "x": 1.5, "z": 0.0}),
+        ]
+        fled, detail = acceptance.wait_for_flee(
+            "A", (0.0, 0.0), 5, poll=0, read=lambda: reads.pop(0))
+        self.assertTrue(fled, detail)
+        self.assertIn("1.50 m", detail)
+
+    def test_a_cat_that_says_flee_but_stands_still_fails(self):
+        # The reason displacement is required at all: a state field alone would
+        # pass on a turret that relabelled the cat and never moved it.
+        fled, detail = acceptance.wait_for_flee(
+            "A", (0.0, 0.0), 0.05, poll=0.01,
+            read=lambda: self.state({"name": "A", "behavior": "flee", "x": 0.01, "z": 0.0}))
+        self.assertFalse(fled)
+        self.assertIn("entered flee but only moved", detail)
+
+    def test_a_cat_that_never_flees_fails(self):
+        fled, detail = acceptance.wait_for_flee(
+            "A", (0.0, 0.0), 0.05, poll=0.01,
+            read=lambda: self.state({"name": "A", "behavior": "misbehavior", "x": 0.0, "z": 0.0}))
+        self.assertFalse(fled)
+        self.assertIn('never reported behavior "flee"', detail)
+
+    def test_no_squat_is_inconclusive_not_a_failure(self):
+        # We learned nothing about the flee. Reporting FAIL would blame the sim
+        # for our timing, and reporting PASS would claim a proof we do not have.
+        client = FakeMqtt([], [(ACK_TOPIC, ack())])
+        result = acceptance.Result(acceptance.CRITERIA)
+        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+                              find_squat=lambda _s: None, squat_wait=0)
+        self.assertEqual(result.verdict("C5"), "INCONC")
+        self.assertIn("never exercised", result.note("C5"))
+
+    def test_no_flee_flag_is_inconclusive_not_a_pass(self):
+        # Caught by running it: --no-flee reported PASS against a label that
+        # promises the flee, which is the same overclaim - a green wider than
+        # what the run checked - this harness was rewritten to eliminate.
+        client = FakeMqtt([], [(ACK_TOPIC, ack())])
+        result = acceptance.Result(acceptance.CRITERIA)
+        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+                              prove_flee=False)
+        self.assertEqual(result.verdict("C5"), "INCONC")
+        self.assertIn("--no-flee", result.note("C5"))
+
+    def test_a_failed_flee_fails_the_criterion_even_though_the_ack_was_fine(self):
+        client = FakeMqtt([], [(ACK_TOPIC, ack())])
+        result = acceptance.Result(acceptance.CRITERIA)
+        acceptance.check_fire(
+            result, "sound", "C5", connect=lambda **kw: client,
+            find_squat=lambda _s: {"name": "A", "x": 0.0, "z": 0.0},
+            watch_flee=lambda *a, **k: (False, "A never moved"))
+        self.assertEqual(result.verdict("C5"), "FAIL")
+        ack_rows = [r for r in result.rows if r[1] == "fire level=sound"]
+        self.assertTrue(ack_rows[0][2], "the ack half should still have passed")
+
+    def test_ack_and_flee_together_pass(self):
+        client = FakeMqtt([], [(ACK_TOPIC, ack())])
+        result = acceptance.Result(acceptance.CRITERIA)
+        acceptance.check_fire(
+            result, "sound", "C5", connect=lambda **kw: client,
+            find_squat=lambda _s: {"name": "A", "x": 0.0, "z": 0.0},
+            watch_flee=lambda *a, **k: (True, "A fled 2.10 m"))
+        self.assertEqual(result.verdict("C5"), "PASS")
+
+    def test_the_fire_is_published_only_after_a_squat_is_found(self):
+        # Ordering IS the check. VirtualTurret only calls FleeFrom on a cat
+        # that is already squatting, so a fire published first startles nobody
+        # and the run would pass having proved nothing.
+        order = []
+        client = FakeMqtt([], [(ACK_TOPIC, ack())])
+        real_publish = client.publish
+
+        def watched_publish(*a, **kw):
+            order.append("publish")
+            return real_publish(*a, **kw)
+
+        client.publish = watched_publish
+        result = acceptance.Result(acceptance.CRITERIA)
+
+        def find(_seconds):
+            order.append("found-squat")
+            return {"name": "A", "x": 0.0, "z": 0.0}
+
+        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+                              find_squat=find,
+                              watch_flee=lambda *a, **k: (True, "A fled 2.00 m"))
+        self.assertLess(order.index("found-squat"), order.index("publish"))
 
 
 class RosterTest(unittest.TestCase):
@@ -286,11 +412,15 @@ class RosterTest(unittest.TestCase):
         codes = [code for code, _ in acceptance.CRITERIA]
         self.assertEqual(codes, ["C2", "C4", "C5", "C6"])
 
-    def test_the_banner_claims_only_the_ack_half_of_5_and_6(self):
+    def test_the_banner_claims_the_flee_and_excludes_what_is_unproven(self):
+        # The label is the coverage claim. It now promises the flee, because the
+        # flee is checked - and still disclaims the local audio-visual effects,
+        # which are not observable from outside Unity.
         labels = dict(acceptance.CRITERIA)
-        for code in ("C5", "C6"):
+        for code, unproven in (("C5", "chirp"), ("C6", "puff")):
             with self.subTest(code=code):
-                self.assertIn("ack only", labels[code])
+                self.assertIn("flees", labels[code])
+                self.assertIn(unproven, labels[code])
         line = acceptance.coverage_line()
         for code, label in acceptance.CRITERIA:
             self.assertIn(code, line)

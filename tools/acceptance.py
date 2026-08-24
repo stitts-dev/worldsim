@@ -4,16 +4,25 @@ soak). Runs against a live sim: Unity in Play mode plus a mosquitto broker on
 localhost:1883. Everything here is external to Unity on purpose - it exercises
 exactly the surface the real cat-sentry detector uses.
 
-Criteria 5 and 6 are only half covered. design.md asks for "chirp + ring in
-sim, ack published, squatting cat flees"; from outside Unity only the ack is
-visible. The chirp, the puff and the flee still need an in-editor check. The
-CRITERIA roster below says so, and the banner and summary are printed from it.
+Criteria 5 and 6 prove the closed loop: the deterrent is acknowledged AND a
+squatting cat visibly flees, read from /inspect. What is still not covered is
+the local audio-visual half - the chirp, the ring and the puff - which is not
+observable from outside Unity and needs an in-editor check. The CRITERIA
+roster below claims exactly that much, and the banner and summary are printed
+from it.
+
+Because a misbehavior squat is on a random 60-120 s cadence, a full run waits
+for one and can take a few minutes. If no cat squats inside the window the
+flee reports INCONCLUSIVE rather than FAIL - we learned nothing about the
+flee, which is not the same as the sim getting it wrong.
 
     python3 tools/acceptance.py            # criteria 2, 4, 5, 6
+    python3 tools/acceptance.py --no-flee  # acks only, 5 and 6 inconclusive
     python3 tools/acceptance.py --soak 600 # + criterion 7 (seconds)
 
 Exit codes: 0 every covered criterion passed, 1 a criterion failed, 3 the sim
-could not be reached at all - infrastructure, not a product bug.
+could not be reached at all - infrastructure, not a product bug, 4 nothing
+failed but a criterion was never exercised (see INCONC rows).
 
 No third-party dependencies: MJPEG over http.client, MQTT over a hand-rolled
 minimal 3.1.1 client (connect/subscribe/publish/ping only).
@@ -23,6 +32,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import math
 import re
 import socket
 import struct
@@ -45,6 +55,24 @@ FPS_MIN = 10.0
 FPS_MAX = 15.0
 STREAM_SAMPLE_FRAMES = 30
 
+# Flee proof (criteria 5 and 6). A misbehavior squat is on a 60-120 s random
+# cadence per cat, so waiting for one is the slow part and the default has to
+# cover the worst case with room to spare rather than the average.
+SQUAT_WAIT_SEC = 180
+# The cat sprints to a far corner of a 6x4 m room, so it clears this easily.
+# Set well above NavMesh jitter so "it twitched" cannot pass as "it fled".
+FLEE_MIN_DISTANCE_M = 0.5
+FLEE_WAIT_SEC = 15
+# How often to ask /inspect while watching for the reaction.
+#
+# This has to be fast, and the reason is not obvious. Time.captureDeltaTime is
+# pinned, so the sim advances at whatever rate the editor renders - measured at
+# ~5x real time - and the Fleeing state lasts only a second or two of SIM time.
+# Measured end to end: the flee was observable for 0.213 s of WALL clock. A
+# 0.2 s poll caught it about half the time and reported a healthy sim as a
+# criterion failure. Sampling has to be much finer than the thing sampled.
+FLEE_POLL_SEC = 0.02
+
 # One row per criterion this harness can actually judge, with a label that
 # claims no more than it proves. The banner, the summary and the exit code all
 # come from this roster, so coverage cannot be overstated in one place and
@@ -52,14 +80,19 @@ STREAM_SAMPLE_FRAMES = 30
 CRITERIA = (
     ("C2", "MJPEG stream and snapshot"),
     ("C4", "telemetry heartbeats"),
-    ("C5", "sound deterrent (ack only - not the chirp, ring or flee)"),
-    ("C6", "air deterrent (ack only - not the puff or flee)"),
+    ("C5", "sound deterrent: ack, and a squatting cat flees (not the chirp or ring)"),
+    ("C6", "air deterrent: ack, and a squatting cat flees (not the puff)"),
 )
 SOAK_CRITERION = ("C7", "stream and MQTT survive a long run")
 
 EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_INFRA = 3
+# Distinct from both: nothing is known to be broken, but a criterion was never
+# put to the question. Exiting 0 here would let a caller reading only the code
+# treat "we did not check the closed loop" as "the closed loop works", which is
+# the same overclaim as a green that outran its evidence.
+EXIT_INCONCLUSIVE = 4
 
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
@@ -75,6 +108,7 @@ class Result:
         self.labels = dict(self.roster)
         self.rows = []
         self.skipped = {}
+        self.inconclusive = {}
 
     def add(self, criterion, name, ok, detail):
         self.rows.append((criterion, name, ok, detail))
@@ -85,6 +119,15 @@ class Result:
         self.skipped[criterion] = why
         print(f"[SKIP] {criterion}  {self.labels.get(criterion, '')}: {why}", flush=True)
 
+    def inconclusive_check(self, criterion, name, why):
+        """The check could not be attempted, which is neither a pass nor a
+        failure of the product. The flee proof needs a cat to squat on its own
+        schedule; if none does in the window we learned nothing about the flee,
+        and reporting that as FAIL would blame the sim for our timing. Distinct
+        from skip(), which means a human asked us not to run it."""
+        self.inconclusive[criterion] = why
+        print(f"[INCONC] {criterion}  {name}: {why}", flush=True)
+
     def rows_for(self, criterion):
         return [r for r in self.rows if r[0] == criterion]
 
@@ -94,7 +137,12 @@ class Result:
         rows = self.rows_for(criterion)
         if not rows:
             return "FAIL"
-        return "PASS" if all(r[2] for r in rows) else "FAIL"
+        if not all(r[2] for r in rows):
+            return "FAIL"
+        # Every row that ran passed, but part of the criterion never got asked.
+        if criterion in self.inconclusive:
+            return "INCONC"
+        return "PASS"
 
     def note(self, criterion):
         if criterion in self.skipped:
@@ -105,7 +153,10 @@ class Result:
         failed = [r for r in rows if not r[2]]
         if failed:
             return "; ".join(f"{r[1]}: {r[3]}" for r in failed)
-        return f"{len(rows)}/{len(rows)} checks"
+        note = f"{len(rows)}/{len(rows)} checks"
+        if criterion in self.inconclusive:
+            note += f" - but {self.inconclusive[criterion]}"
+        return note
 
 
 def coverage_line(roster=CRITERIA):
@@ -127,6 +178,90 @@ def sim_reachable(timeout=3):
         return False
 
 
+def inspect(timeout=5):
+    """The sim's own account of every cat. /inspect only - an acceptance run
+    must never call /reset or /step: reset lands the sim PAUSED, a paused sim
+    still serves frames on unscaled time, and criterion 2 would then pass on a
+    still image. Reading is safe; driving is not."""
+    conn = http.client.HTTPConnection(STREAM_HOST, CONTROL_PORT, timeout=timeout)
+    try:
+        conn.request("GET", "/inspect")
+        resp = conn.getresponse()
+        body = resp.read()
+        if resp.status != 200:
+            raise RuntimeError(f"/inspect returned HTTP {resp.status}")
+        return json.loads(body)
+    finally:
+        conn.close()
+
+
+def cats_by_behavior(state, behavior):
+    return [e for e in state.get("entities", [])
+            if e.get("type") == "cat" and e.get("behavior") == behavior]
+
+
+def wait_for_misbehaving_cat(seconds, poll=0.5, read=inspect):
+    """Block until some cat is squatting on the FLOOR, and return it.
+
+    Targets behavior == "misbehavior" and not IsSquatting, deliberately.
+    IsSquatting also covers a cat correctly using a litterbox, so firing on it
+    would prove the deterrent startles a cat that was doing nothing wrong -
+    the negative class - which is not what criteria 5 and 6 are about.
+    """
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            squatting = cats_by_behavior(read(), "misbehavior")
+        except Exception:
+            squatting = []
+        if squatting:
+            return squatting[0]
+        time.sleep(poll)
+    return None
+
+
+def wait_for_flee(name, origin, seconds, poll=FLEE_POLL_SEC, read=inspect):
+    """Watch one named cat for the reaction. Returns (fled, detail).
+
+    Requires BOTH the reported behaviour and real displacement: a state field
+    alone would pass on a cat that flipped to "flee" and stood still, which is
+    the failure this check exists to catch.
+    """
+    ox, oz = origin
+    deadline = time.time() + seconds
+    best = 0.0
+    saw_flee = False
+    while time.time() < deadline:
+        try:
+            state = read()
+        except Exception:
+            time.sleep(poll)
+            continue
+        for e in state.get("entities", []):
+            if e.get("name") != name:
+                continue
+            moved = math.hypot(e.get("x", ox) - ox, e.get("z", oz) - oz)
+            best = max(best, moved)
+            if e.get("behavior") == "flee":
+                saw_flee = True
+            if saw_flee and best >= FLEE_MIN_DISTANCE_M:
+                return True, f"{name} fled {best:.2f} m"
+        time.sleep(poll)
+
+    if saw_flee:
+        return False, (f"{name} entered flee but only moved {best:.2f} m "
+                       f"in {seconds}s (want >={FLEE_MIN_DISTANCE_M})")
+    if best >= FLEE_MIN_DISTANCE_M:
+        # It went somewhere, we just never caught the label. Saying "no flee"
+        # here would blame the sim for our sampling rate - the Fleeing window is
+        # a fraction of a second of wall clock at typical editor speeds.
+        return False, (f"{name} moved {best:.2f} m but was never sampled in state "
+                       f"\"flee\" - the flee window is under a second of wall clock, "
+                       f"so this is more likely a sampling miss than a sim failure")
+    return False, (f"{name} never reported behavior \"flee\" within {seconds}s "
+                   f"(moved {best:.2f} m)")
+
+
 def summarize(result, probe=None):
     """Print the per-criterion summary and return the process exit code."""
     probe = probe or sim_reachable
@@ -141,8 +276,11 @@ def summarize(result, probe=None):
 
     passed = sum(1 for m in marks.values() if m == "PASS")
     skipped = sum(1 for m in marks.values() if m == "SKIP")
+    unproven = sum(1 for m in marks.values() if m == "INCONC")
     covered = len(marks) - skipped
     line = f"{passed}/{covered} criteria passed"
+    if unproven:
+        line += f", {unproven} inconclusive (part of the criterion never got asked)"
     if skipped:
         line += f", {skipped} skipped (not run, not passed)"
     print(f"=== {line} ===", flush=True)
@@ -152,7 +290,14 @@ def summarize(result, probe=None):
               "the sim is not running, or its control surface is not enabled. "
               "Treat the failures above as infrastructure, not product.", flush=True)
         return EXIT_INFRA
-    return EXIT_FAILED if failed else EXIT_OK
+    if failed:
+        return EXIT_FAILED
+    if unproven:
+        print("nothing failed, but the run did not prove everything its criteria "
+              "claim - see the INCONC rows above. Re-run when the sim has been "
+              "up long enough for a squat, or accept a narrower claim.", flush=True)
+        return EXIT_INCONCLUSIVE
+    return EXIT_OK
 
 
 # ---------------- MQTT (minimal 3.1.1 client) ----------------
@@ -476,8 +621,38 @@ def evaluate_ack(acks, level, window):
     return ok, f"ack {acks[0]}"
 
 
-def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt):
-    """Criteria 5/6: publishing a fire command produces exactly one ack."""
+def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt,
+               prove_flee=True, squat_wait=SQUAT_WAIT_SEC,
+               find_squat=wait_for_misbehaving_cat, watch_flee=wait_for_flee):
+    """Criteria 5/6: a fire command is acknowledged, and a squatting cat flees.
+
+    The ack alone was never the criterion. design.md asks for the closed loop -
+    a deterrent lands and the sim REACTS - and a VirtualTurret that published a
+    correct ack while doing nothing else would have passed the old check. That
+    reaction is the only thing proving this is a digital twin of anything.
+
+    The fire has to be published while a cat is already squatting on the floor:
+    VirtualTurret.NotifySquattingCats only calls FleeFrom on a cat whose
+    IsSquatting is true, so a fire sent at an arbitrary moment startles nobody
+    and a check that does not wait would pass while proving nothing at all.
+    """
+    target = None
+    if not prove_flee:
+        # The label promises the flee, so a run that skipped it cannot report
+        # PASS - that would be the exact disease this harness was rewritten to
+        # cure: a verdict claiming more than the run checked.
+        result.inconclusive_check(
+            criterion, f"flee after level={level}",
+            "--no-flee was passed, so the closed loop was not exercised")
+    else:
+        print(f"  waiting up to {squat_wait}s for a cat to squat (60-120s cadence)...",
+              flush=True)
+        target = find_squat(squat_wait)
+        if target is None:
+            result.inconclusive_check(
+                criterion, f"flee after level={level}",
+                f"no cat squatted within {squat_wait}s, so the flee was never exercised")
+
     try:
         client = connect(client_id=f"acceptance-fire-{level}")
         client.subscribe(ACK_TOPIC)
@@ -495,6 +670,12 @@ def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt):
             "reason": "acceptance test",
         }
         client.publish(FIRE_TOPIC, json.dumps(fire), qos=1)
+
+        if target is not None:
+            fled, detail = watch_flee(target["name"], (target["x"], target["z"]),
+                                      FLEE_WAIT_SEC)
+            result.add(criterion, f"flee after level={level}", fled, detail)
+
         acks = collect_acks(client, window)
         client.close()
 
@@ -549,6 +730,10 @@ def main():
                         help="also run the criterion-7 soak for this many seconds")
     parser.add_argument("--skip-telemetry", action="store_true",
                         help="skip the 25 s telemetry window (faster smoke run)")
+    parser.add_argument("--no-flee", action="store_true",
+                        help="check only the deterrent acks, not the cat's reaction. "
+                             "Faster, but it no longer proves the closed loop - "
+                             "criteria 5 and 6 report as inconclusive.")
     args = parser.parse_args()
 
     roster = list(CRITERIA)
@@ -563,8 +748,8 @@ def main():
         result.skip("C4", "--skip-telemetry was passed")
     else:
         check_telemetry(result)
-    check_fire(result, "sound", "C5")
-    check_fire(result, "air", "C6")
+    check_fire(result, "sound", "C5", prove_flee=not args.no_flee)
+    check_fire(result, "air", "C6", prove_flee=not args.no_flee)
     if args.soak:
         soak(result, args.soak)
 
