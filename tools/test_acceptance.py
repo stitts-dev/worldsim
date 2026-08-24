@@ -236,7 +236,7 @@ class FireDrainTest(unittest.TestCase):
         # An ack already on the topic when the harness subscribes must not be
         # counted against the fire this run publishes.
         client = FakeMqtt([(ACK_TOPIC, ack())], [(ACK_TOPIC, ack())])
-        result = acceptance.Result()
+        result = acceptance.Result(acceptance.CRITERIA)
         acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client)
         self.assertTrue(result.rows[0][2], result.rows[0][3])
         order = [entry[0] for entry in client.log]
@@ -244,10 +244,57 @@ class FireDrainTest(unittest.TestCase):
 
     def test_a_duplicate_ack_after_the_fire_fails(self):
         client = FakeMqtt([], [(ACK_TOPIC, ack()), (ACK_TOPIC, ack())])
-        result = acceptance.Result()
+        result = acceptance.Result(acceptance.CRITERIA)
         acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client)
         self.assertFalse(result.rows[0][2])
         self.assertIn("2 acks, expected 1", result.rows[0][3])
+
+
+
+class RosterTest(unittest.TestCase):
+    def result(self, rows=(), skips=()):
+        r = acceptance.Result(acceptance.CRITERIA)
+        for code, ok in rows:
+            r.add(code, "check", ok, "detail")
+        for code, why in skips:
+            r.skip(code, why)
+        return r
+
+    def test_a_criterion_whose_check_never_ran_is_not_a_pass(self):
+        # Against a dead sim the connection throws before some rows are ever
+        # added. The old summary moved its own denominator and all([]) is True.
+        r = self.result([("C2", True)])
+        self.assertEqual(r.verdict("C2"), "PASS")
+        for code in ("C4", "C5", "C6"):
+            with self.subTest(code=code):
+                self.assertEqual(r.verdict(code), "FAIL")
+
+    def test_a_run_where_nothing_ran_at_all_fails(self):
+        self.assertNotEqual(acceptance.summarize(self.result()), 0)
+
+    def test_every_row_of_a_criterion_has_to_pass(self):
+        r = self.result([("C2", True), ("C2", False)])
+        self.assertEqual(r.verdict("C2"), "FAIL")
+
+    def test_a_skipped_criterion_reads_as_skip_and_is_not_counted_as_covered(self):
+        r = self.result([("C2", True), ("C5", True), ("C6", True)],
+                        [("C4", "--skip-telemetry")])
+        self.assertEqual(r.verdict("C4"), "SKIP")
+        self.assertEqual(acceptance.summarize(r), 0)
+
+    def test_the_roster_is_criteria_not_rows(self):
+        codes = [code for code, _ in acceptance.CRITERIA]
+        self.assertEqual(codes, ["C2", "C4", "C5", "C6"])
+
+    def test_the_banner_claims_only_the_ack_half_of_5_and_6(self):
+        labels = dict(acceptance.CRITERIA)
+        for code in ("C5", "C6"):
+            with self.subTest(code=code):
+                self.assertIn("ack only", labels[code])
+        line = acceptance.coverage_line()
+        for code, label in acceptance.CRITERIA:
+            self.assertIn(code, line)
+            self.assertIn(label, line)
 
 
 if __name__ == "__main__":

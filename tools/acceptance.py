@@ -36,22 +36,90 @@ FPS_MIN = 10.0
 FPS_MAX = 15.0
 STREAM_SAMPLE_FRAMES = 30
 
+# One row per criterion this harness can actually judge, with a label that
+# claims no more than it proves. The banner, the summary and the exit code all
+# come from this roster, so coverage cannot be overstated in one place and
+# under-counted in another.
+CRITERIA = (
+    ("C2", "MJPEG stream and snapshot"),
+    ("C4", "telemetry heartbeats"),
+    ("C5", "sound deterrent (ack only - not the chirp, ring or flee)"),
+    ("C6", "air deterrent (ack only - not the puff or flee)"),
+)
+SOAK_CRITERION = ("C7", "stream and MQTT survive a long run")
+
+EXIT_OK = 0
+EXIT_FAILED = 1
+
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 
 
 class Result:
-    def __init__(self):
+    """Verdicts per CRITERION, not per row. Several rows can belong to one
+    criterion, and a criterion with no rows at all has not passed - against a
+    dead sim a check can vanish rather than fail, and all([]) is True."""
+
+    def __init__(self, roster):
+        self.roster = list(roster)
+        self.labels = dict(self.roster)
         self.rows = []
+        self.skipped = {}
 
     def add(self, criterion, name, ok, detail):
         self.rows.append((criterion, name, ok, detail))
         mark = "PASS" if ok else "FAIL"
         print(f"[{mark}] {criterion}  {name}: {detail}", flush=True)
 
-    @property
-    def ok(self):
-        return all(r[2] for r in self.rows)
+    def skip(self, criterion, why):
+        self.skipped[criterion] = why
+        print(f"[SKIP] {criterion}  {self.labels.get(criterion, '')}: {why}", flush=True)
+
+    def rows_for(self, criterion):
+        return [r for r in self.rows if r[0] == criterion]
+
+    def verdict(self, criterion):
+        if criterion in self.skipped:
+            return "SKIP"
+        rows = self.rows_for(criterion)
+        if not rows:
+            return "FAIL"
+        return "PASS" if all(r[2] for r in rows) else "FAIL"
+
+    def note(self, criterion):
+        if criterion in self.skipped:
+            return self.skipped[criterion]
+        rows = self.rows_for(criterion)
+        if not rows:
+            return "no check completed - the run never got this far"
+        failed = [r for r in rows if not r[2]]
+        if failed:
+            return "; ".join(f"{r[1]}: {r[3]}" for r in failed)
+        return f"{len(rows)}/{len(rows)} checks"
+
+
+def coverage_line(roster=CRITERIA):
+    return ", ".join(f"{code} {label}" for code, label in roster)
+
+
+def summarize(result):
+    """Print the per-criterion summary and return the process exit code."""
+    marks = {code: result.verdict(code) for code, _ in result.roster}
+    failed = [code for code, mark in marks.items() if mark == "FAIL"]
+
+    print("\n=== summary ===", flush=True)
+    for code, label in result.roster:
+        print(f"  [{marks[code]:5}] {code}  {label}: {result.note(code)}", flush=True)
+
+    passed = sum(1 for m in marks.values() if m == "PASS")
+    skipped = sum(1 for m in marks.values() if m == "SKIP")
+    covered = len(marks) - skipped
+    line = f"{passed}/{covered} criteria passed"
+    if skipped:
+        line += f", {skipped} skipped (not run, not passed)"
+    print(f"=== {line} ===", flush=True)
+
+    return EXIT_FAILED if failed else EXIT_OK
 
 
 # ---------------- MQTT (minimal 3.1.1 client) ----------------
@@ -450,19 +518,24 @@ def main():
                         help="skip the 25 s telemetry window (faster smoke run)")
     args = parser.parse_args()
 
-    result = Result()
-    print("=== worldsim acceptance (docs/design.md criteria 2, 4, 5, 6) ===\n", flush=True)
+    roster = list(CRITERIA)
+    if args.soak:
+        roster.append(SOAK_CRITERION)
+    result = Result(roster)
+    print("=== worldsim acceptance ===", flush=True)
+    print(f"covers: {coverage_line(roster)}\n", flush=True)
+
     check_stream(result)
-    if not args.skip_telemetry:
+    if args.skip_telemetry:
+        result.skip("C4", "--skip-telemetry was passed")
+    else:
         check_telemetry(result)
     check_fire(result, "sound", "C5")
     check_fire(result, "air", "C6")
     if args.soak:
         soak(result, args.soak)
 
-    passed = sum(1 for r in result.rows if r[2])
-    print(f"\n=== {passed}/{len(result.rows)} checks passed ===", flush=True)
-    return 0 if result.ok else 1
+    return summarize(result)
 
 
 if __name__ == "__main__":
