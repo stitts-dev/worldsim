@@ -195,6 +195,42 @@ class FpsGateTest(unittest.TestCase):
         self.assertEqual((acceptance.FPS_MIN, acceptance.FPS_MAX), (10.0, 15.0))
 
 
+
+def beat(ts="2026-08-24T00:00:00Z", source="sim", status="ok"):
+    return json.dumps({"ts": ts, "source": source, "status": status})
+
+
+class TelemetryShapeTest(unittest.TestCase):
+    def evaluate(self, payloads):
+        stamps = [i * 10.0 for i in range(len(payloads))]
+        return acceptance.evaluate_telemetry(stamps, payloads, 25)
+
+    def test_all_good_beats_pass(self):
+        ok, detail = self.evaluate([beat()] * 3)
+        self.assertTrue(ok, detail)
+
+    def test_one_good_beat_does_not_excuse_four_bad_ones(self):
+        ok, detail = self.evaluate([beat(status="degraded")] * 4 + [beat()])
+        self.assertFalse(ok)
+        self.assertIn("1/5 payloads valid", detail)
+
+    def test_a_bad_beat_anywhere_fails(self):
+        ok, detail = self.evaluate([beat(), beat(source="sensor"), beat()])
+        self.assertFalse(ok)
+        self.assertIn("2/3 payloads valid", detail)
+
+    def test_json_that_is_not_an_object_is_a_shape_failure_not_a_crash(self):
+        for payload in ("not json", "[]", "3", '{"ts": 7, "source": "sim", "status": "ok"}'):
+            with self.subTest(payload=payload):
+                ok, detail = self.evaluate([beat(), payload])
+                self.assertFalse(ok)
+                self.assertIn("1/2 payloads valid", detail)
+
+    def test_a_bad_gap_fails_even_with_good_payloads(self):
+        ok, _ = acceptance.evaluate_telemetry([0.0, 30.0], [beat(), beat()], 25)
+        self.assertFalse(ok)
+
+
 class FireDrainTest(unittest.TestCase):
     def test_a_stale_ack_is_drained_before_the_fire(self):
         # An ack already on the topic when the harness subscribes must not be

@@ -294,20 +294,40 @@ def check_stream(result, want_frames=STREAM_SAMPLE_FRAMES):
         result.add("C2", "/stream frames", False, f"{type(e).__name__}: {e}")
 
 
+def parse_heartbeat(payload):
+    """True if one telemetry payload matches the catsentry-v1 shape. Anything
+    unreadable is a shape failure, not an exception: a payload that is valid
+    JSON but not an object used to escape .get as an AttributeError and get
+    reported as a crash."""
+    try:
+        msg = json.loads(payload)
+    except ValueError:
+        return False
+    if not isinstance(msg, dict):
+        return False
+    ts = msg.get("ts")
+    return (msg.get("source") == "sim" and msg.get("status") == "ok"
+            and isinstance(ts, str)
+            and re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", ts) is not None)
+
+
 def evaluate_telemetry(stamps, payloads, window):
-    """Criterion 4 verdict from a collected heartbeat window."""
+    """Criterion 4 verdict from a collected heartbeat window. Every payload has
+    to hold up - checking only the last one passed four malformed beats so long
+    as the fifth was well formed."""
     if len(stamps) < 2:
         return False, f"only {len(stamps)} heartbeat(s) in {window}s (expected >=2)"
     gaps = [b - a for a, b in zip(stamps, stamps[1:])]
     avg = sum(gaps) / len(gaps)
-    try:
-        msg = json.loads(payloads[-1])
-        shape_ok = msg.get("source") == "sim" and msg.get("status") == "ok" and \
-            re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", msg.get("ts", "")) is not None
-    except json.JSONDecodeError:
-        shape_ok = False
+    good = [parse_heartbeat(p) for p in payloads]
+    shape_ok = all(good)
     ok = 8.0 <= avg <= 12.5 and shape_ok
-    return ok, f"{len(stamps)} beats, avg gap {avg:.1f}s (contract 10s), payload {payloads[-1]}"
+    detail = (f"{len(stamps)} beats, avg gap {avg:.1f}s (contract 10s), "
+              f"{sum(good)}/{len(good)} payloads valid")
+    if shape_ok:
+        return ok, f"{detail}, payload {payloads[-1]}"
+    first_bad = payloads[good.index(False)]
+    return ok, f"{detail}, first bad payload {first_bad!r}"
 
 
 def check_telemetry(result, window=25):
