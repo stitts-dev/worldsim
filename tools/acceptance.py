@@ -30,6 +30,12 @@ FIRE_TOPIC = "catsentry/deterrent/fire"
 ACK_TOPIC = "catsentry/deterrent/ack"
 TELEMETRY_TOPIC = "catsentry/telemetry"
 
+# The catsentry-v1 frame spec. The gate and the string the harness prints both
+# come from these, so a printed claim can never outrun the code again.
+FPS_MIN = 10.0
+FPS_MAX = 15.0
+STREAM_SAMPLE_FRAMES = 30
+
 JPEG_SOI = b"\xff\xd8"
 JPEG_EOI = b"\xff\xd9"
 
@@ -227,28 +233,38 @@ def collect_stream_sample(resp, want_frames, timeout, clock=time.time):
     return sample
 
 
+def measured_window(sample):
+    """Seconds between the first and last extracted frame. Not the time since
+    the request: joining an MJPEG stream costs on average half a frame interval
+    waiting for the first complete JPEG, and that wait is not the sim's rate."""
+    if sample.frames < 2:
+        return 0.0
+    return sample.stamps[-1] - sample.stamps[0]
+
+
 def estimate_fps(sample):
-    elapsed = sample.finished - sample.started
-    if sample.frames > 1 and elapsed > 0:
-        return (sample.frames - 1) / elapsed
+    window = measured_window(sample)
+    if sample.frames > 1 and window > 0:
+        return (sample.frames - 1) / window
     return 0.0
 
 
 def evaluate_stream(sample, want_frames):
     fps = estimate_fps(sample)
-    elapsed = sample.finished - sample.started
+    window = measured_window(sample)
     distinct = len(set(sample.digests))
     moving = distinct >= 2
-    ok = sample.frames >= want_frames and 8.0 <= fps <= 18.0 and moving
+    ok = sample.frames >= want_frames and FPS_MIN <= fps <= FPS_MAX and moving
     median = sorted(sample.sizes)[len(sample.sizes) // 2] if sample.sizes else 0
-    detail = (f"{sample.frames} JPEGs in {elapsed:.1f}s (~{fps:.1f} fps, contract 10-15), "
+    detail = (f"{sample.frames} JPEGs in {window:.1f}s "
+              f"(~{fps:.1f} fps, contract {FPS_MIN:g}-{FPS_MAX:g}), "
               f"median {median} bytes, {distinct} distinct")
     if not moving:
         detail += " - every frame identical, the stream is frozen"
     return ok, detail
 
 
-def check_stream(result, want_frames=5):
+def check_stream(result, want_frames=STREAM_SAMPLE_FRAMES):
     """Criterion 2: /stream serves MJPEG at contract fps, /snapshot serves a JPEG."""
     try:
         conn = http.client.HTTPConnection(STREAM_HOST, STREAM_PORT, timeout=10)

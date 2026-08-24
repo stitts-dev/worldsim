@@ -114,6 +114,87 @@ class FrozenStreamTest(unittest.TestCase):
         self.assertTrue(ok, detail)
 
 
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+class FakeStream:
+    """An MJPEG body that hands out one frame per read, `interval` seconds of
+    wall clock apart. The first read returns only part of the first frame:
+    joining a live stream mid-frame is the normal case, and the wait for the
+    first complete JPEG must not land inside the measured window."""
+
+    def __init__(self, clock, count, interval=0.1):
+        first = jpeg(0)
+        self.chunks = [first[:3], first[3:]]
+        self.chunks += [jpeg(i) for i in range(1, count)]
+        self.clock = clock
+        self.interval = interval
+
+    def read(self, n):
+        self.clock.now += self.interval
+        return self.chunks.pop(0) if self.chunks else b""
+
+
+class FpsEstimatorTest(unittest.TestCase):
+    def collect(self, count, interval=0.1):
+        clock = Clock()
+        stream = FakeStream(clock, count, interval)
+        return acceptance.collect_stream_sample(stream, count, timeout=60, clock=clock)
+
+    def test_the_wait_for_the_first_frame_is_not_measured(self):
+        # 30 frames 0.1s apart is exactly 10 fps. Timing from before the first
+        # read charges the harness for the partial frame it joined mid-way and
+        # biases the estimate low.
+        sample = self.collect(30)
+        self.assertEqual(sample.frames, 30)
+        self.assertAlmostEqual(acceptance.estimate_fps(sample), 10.0, places=9)
+
+    def test_the_estimate_is_unbiased_at_any_sample_length(self):
+        for count in (5, 10, 30):
+            with self.subTest(count=count):
+                self.assertAlmostEqual(acceptance.estimate_fps(self.collect(count)), 10.0, places=9)
+
+    def test_a_genuinely_slow_stream_still_reads_slow(self):
+        self.assertAlmostEqual(acceptance.estimate_fps(self.collect(30, interval=0.2)), 5.0, places=9)
+
+
+def sample_at_fps(fps):
+    """Frames spanning exactly one second, so the band edges are testable
+    without float slop."""
+    count = int(fps) + 1
+    sample = acceptance.StreamSample(started=0.0)
+    for i in range(count):
+        sample.add(jpeg(i), i * 1.0 / (count - 1))
+    sample.finished = 1.0
+    return sample
+
+
+class FpsGateTest(unittest.TestCase):
+    def evaluate(self, fps):
+        sample = sample_at_fps(fps)
+        return acceptance.evaluate_stream(sample, sample.frames)
+
+    def test_the_contract_band_is_the_gate(self):
+        for fps in (acceptance.FPS_MIN, 12.0, acceptance.FPS_MAX):
+            with self.subTest(fps=fps):
+                ok, detail = self.evaluate(fps)
+                self.assertTrue(ok, detail)
+        for fps in (9.0, 16.0):
+            with self.subTest(fps=fps):
+                ok, _ = self.evaluate(fps)
+                self.assertFalse(ok)
+
+    def test_the_printed_band_comes_from_the_gate_constants(self):
+        _, detail = self.evaluate(12.0)
+        self.assertIn(f"contract {acceptance.FPS_MIN:g}-{acceptance.FPS_MAX:g}", detail)
+        self.assertEqual((acceptance.FPS_MIN, acceptance.FPS_MAX), (10.0, 15.0))
+
+
 class FireDrainTest(unittest.TestCase):
     def test_a_stale_ack_is_drained_before_the_fire(self):
         # An ack already on the topic when the harness subscribes must not be
