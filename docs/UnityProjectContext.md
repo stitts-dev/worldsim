@@ -89,6 +89,18 @@
 - Do not add a Unity MCP or package unless Editor-only automation is needed and explicitly approved.
 - `SimControl` must survive scene reload and perform all Unity API work on the main thread.
 - Captured scene pixels can include network-timed `EventFeed` text; state JSON is the deterministic gate.
+- **Never time the sim against the wall clock.** `Time.captureDeltaTime` is pinned, so the
+  sim advances at whatever rate the editor renders - 5.08x real time on one machine, and
+  machine-dependent. Measure anything about entity motion (speed, duration) against
+  `simTime` from `/inspect`. The one exception is frame delivery: `FrameStreamer` throttles
+  on unscaled time and the contract counts real frames per real second, so the acceptance
+  harness's fps check is right to use the wall clock.
+- **A capture cannot tell you whether the cats are moving.** Render-gate calibration measured
+  40 frames of cat movement as scoring 0 against a frozen frame - identical. Assert behaviour
+  against `/inspect` JSON; captures guard rendering only.
+- **A deterrent only makes a cat flee if `IsSquatting` is true** (`VirtualTurret.NotifySquattingCats`).
+  Any test of the flee path must wait for a cat to be squatting before publishing the fire,
+  or it gets a green that proves nothing.
 
 ## Unknowns And Confidence
 

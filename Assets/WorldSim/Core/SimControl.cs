@@ -38,7 +38,26 @@ namespace WorldSim.Core
         public int port = 8090;
 
         [Header("Determinism")]
-        /// <summary>Fixed simulated seconds per frame while stepping. 1/60.</summary>
+        /// <summary>Fixed simulated seconds per frame while stepping. 1/60.
+        ///
+        /// <b>Do not time this sim against the wall clock.</b> Because this is
+        /// pinned, one rendered frame always advances sim time by exactly this
+        /// much no matter how long it took to render - so an editor rendering
+        /// faster than 60 fps runs the simulation FASTER than real time, by
+        /// whatever ratio it happens to achieve. Measured at 5.08x on one
+        /// machine (~305 rendered fps), and it is machine-dependent, so it is
+        /// not a constant anyone can correct for.
+        ///
+        /// Anything measuring what an ENTITY does - speed, acceleration, how
+        /// long a behaviour lasted - must divide by simTime from /inspect, not
+        /// by elapsed wall time. Measuring cat speed against the wall clock
+        /// once reported 6-8 m/s for cats whose fastest gait tops out at 3.6,
+        /// which looks exactly like a real bug and is not one.
+        ///
+        /// The exception is FRAME DELIVERY. FrameStreamer throttles on
+        /// unscaled time and the contract is about real frames reaching a real
+        /// detector per real second, so tools/acceptance.py's fps check is
+        /// correct to use the wall clock. Different question, different clock.</summary>
         public float captureDeltaTime = 1f / 60f;
         /// <summary>Seed applied on Awake and on every /reset that omits one.</summary>
         public int defaultSeed = 12345;
