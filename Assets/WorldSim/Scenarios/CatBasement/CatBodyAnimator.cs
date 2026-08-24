@@ -603,12 +603,13 @@ namespace WorldSim.CatBasement
             // Flicks are suppressed while fleeing: the ears are pinned back and a
             // flick on top would read as a twitch, not fear.
             float flickGate = b == Behaviour.Flee ? 0f : 1f;
-            float flick = EarFlick() * flickGate;
-            // One ear at a time, which ear alternates on the hash. Both ears
-            // flicking together looks mechanical.
-            bool leftEar = flick >= 0f;
-            _earLSwivel = Mathf.Lerp(_earLSwivel, leftEar ? Mathf.Abs(flick) : 0f, Damp(earResponse * 2f, dt));
-            _earRSwivel = Mathf.Lerp(_earRSwivel, leftEar ? 0f : Mathf.Abs(flick), Damp(earResponse * 2f, dt));
+            // Which ear is decided by the hash for this interval, NOT by the sign of
+            // the waveform: the ring-down is a decaying sine, so its sign flips
+            // several times inside one flick and reading the ear off it would throw
+            // the flick back and forth between the two ears mid-twitch.
+            float flick = EarFlick(out bool leftEar) * flickGate;
+            _earLSwivel = Mathf.Lerp(_earLSwivel, leftEar ? flick : 0f, Damp(earResponse * 2f, dt));
+            _earRSwivel = Mathf.Lerp(_earRSwivel, leftEar ? 0f : flick, Damp(earResponse * 2f, dt));
 
             // Positive X tips the ear tip forward, negative flattens it back.
             // Composed onto the rest rotation, which already carries the ear's
@@ -618,23 +619,25 @@ namespace WorldSim.CatBasement
         }
 
         /// <summary>
-        /// A decaying ring-down at a hashed instant inside each interval. Sign picks
-        /// the ear. Deterministic and completely independent of UnityEngine.Random,
-        /// so a flick never shifts a CatAgent trigger draw.
+        /// A decaying ring-down at a hashed instant inside each interval, and which
+        /// ear it belongs to. One ear at a time - both ears twitching in unison
+        /// looks mechanical. Deterministic and completely independent of
+        /// UnityEngine.Random, so a flick never shifts a CatAgent trigger draw.
         /// </summary>
-        float EarFlick()
+        float EarFlick(out bool leftEar)
         {
             float interval = Mathf.Max(0.2f, earFlickIntervalSec);
             float u = _t / interval;
             int k = Mathf.FloorToInt(u);
+            leftEar = Hash01(_seed, k * 5 + 5) < 0.5f;
+
             float when = Hash01(_seed, k * 5 + 3);
             float since = (u - k - when) * interval;
             if (since < 0f) return 0f;
 
             float amp = (0.55f + 0.45f * Hash01(_seed, k * 5 + 4)) * earFlickDeg;
-            float sign = Hash01(_seed, k * 5 + 5) < 0.5f ? -1f : 1f;
             float decay = Mathf.Exp(-since / Mathf.Max(0.02f, earFlickDecaySec));
-            return sign * amp * decay * Mathf.Sin(since * 18f);
+            return amp * decay * Mathf.Sin(since * 18f);
         }
 
         // ---- tail ----
