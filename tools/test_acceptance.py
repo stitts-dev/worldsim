@@ -80,6 +80,40 @@ class AckCountTest(unittest.TestCase):
                 self.assertIn("unreadable", detail)
 
 
+def jpeg(seed):
+    """A byte-distinct fake JPEG. Pixel-identical renders encode to identical
+    bytes, so distinct bytes is the same signal a real frame gives."""
+    return acceptance.JPEG_SOI + f"frame-{seed}".encode() + acceptance.JPEG_EOI
+
+
+def sample_of(frames, interval=0.1, lead_in=0.0):
+    """A StreamSample as the collector would have built it: the clock starts at
+    lead_in seconds before the first frame is extracted."""
+    sample = acceptance.StreamSample(started=0.0)
+    for i, frame in enumerate(frames):
+        sample.add(frame, lead_in + i * interval)
+    sample.finished = lead_in + (len(frames) - 1) * interval
+    return sample
+
+
+class FrozenStreamTest(unittest.TestCase):
+    def test_moving_frames_pass(self):
+        ok, detail = acceptance.evaluate_stream(sample_of([jpeg(i) for i in range(5)]), 5)
+        self.assertTrue(ok, detail)
+
+    def test_identical_frames_fail_even_at_a_healthy_rate(self):
+        # A paused sim keeps encoding: the frame server runs on unscaled time,
+        # so delivery rate alone cannot tell a live sim from a frozen one.
+        ok, detail = acceptance.evaluate_stream(sample_of([jpeg(0)] * 5), 5)
+        self.assertFalse(ok)
+        self.assertIn("identical", detail)
+
+    def test_one_changed_frame_is_enough(self):
+        frames = [jpeg(0), jpeg(0), jpeg(0), jpeg(0), jpeg(1)]
+        ok, detail = acceptance.evaluate_stream(sample_of(frames), 5)
+        self.assertTrue(ok, detail)
+
+
 class FireDrainTest(unittest.TestCase):
     def test_a_stale_ack_is_drained_before_the_fire(self):
         # An ack already on the topic when the harness subscribes must not be

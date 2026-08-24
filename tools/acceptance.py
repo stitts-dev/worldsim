@@ -237,10 +237,15 @@ def estimate_fps(sample):
 def evaluate_stream(sample, want_frames):
     fps = estimate_fps(sample)
     elapsed = sample.finished - sample.started
-    ok = sample.frames >= want_frames and 8.0 <= fps <= 18.0
+    distinct = len(set(sample.digests))
+    moving = distinct >= 2
+    ok = sample.frames >= want_frames and 8.0 <= fps <= 18.0 and moving
     median = sorted(sample.sizes)[len(sample.sizes) // 2] if sample.sizes else 0
-    return ok, (f"{sample.frames} JPEGs in {elapsed:.1f}s (~{fps:.1f} fps, contract 10-15), "
-                f"median {median} bytes")
+    detail = (f"{sample.frames} JPEGs in {elapsed:.1f}s (~{fps:.1f} fps, contract 10-15), "
+              f"median {median} bytes, {distinct} distinct")
+    if not moving:
+        detail += " - every frame identical, the stream is frozen"
+    return ok, detail
 
 
 def check_stream(result, want_frames=5):
