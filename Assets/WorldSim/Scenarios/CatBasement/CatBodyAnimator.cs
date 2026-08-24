@@ -157,8 +157,10 @@ namespace WorldSim.CatBasement
         public float digHz = 2.6f;
         [Tooltip("Front-hip swing amplitude while digging, degrees.")]
         public float digSwingDeg = 26f;
-        [Tooltip("Head pitch while sniffing, degrees nose-down, on top of CatAgent's whole-body tilt.")]
+        [Tooltip("Head pitch while sniffing, degrees nose-down, on top of sniffBodyPitchDeg. The head pivot's lever arm to the muzzle is only 7.4 cm, so this alone cannot put the nose near the floor - the body pitch does most of that work.")]
         public float sniffHeadPitchDeg = 26f;
+        [Tooltip("Whole-body nose-down pitch while sniffing, degrees. Replaces the identical tilt CatAgent used to write on the cat ROOT, which contended with the locomotion layer writing root rotation every frame. Applied to Visual instead - same origin, so the pose is preserved without touching the root. MUST be paired with removing that tilt from CatAgent.ApplyPose, or the cat pitches twice.")]
+        public float sniffBodyPitchDeg = 14f;
         [Tooltip("How far the head weaves side to side while sniffing, degrees. Investigating is a moving nose, not a parked one.")]
         public float sniffWeaveDeg = 17f;
         [Tooltip("Sniff head-weave rate, cycles per second.")]
@@ -227,6 +229,7 @@ namespace WorldSim.CatBasement
         float _trotBlend;     // 0 = four-beat walk, 1 = diagonal trot
 
         float _headYaw, _headPitch;
+        float _bodyPitch;
         float _earPitch, _earLSwivel, _earRSwivel;
         float _tailCarriage;
 
@@ -298,6 +301,7 @@ namespace WorldSim.CatBasement
             _tailYawLag = _lastYaw;
             _speed = _accel = _turnRate = _trotBlend = 0f;
             _headYaw = _headPitch = 0f;
+            _bodyPitch = 0f;
             _earPitch = _earLSwivel = _earRSwivel = 0f;
             _tailCarriage = 0f;
         }
@@ -327,7 +331,7 @@ namespace WorldSim.CatBasement
             Behaviour b = ReadBehaviour();
 
             ApplyLegs(b, dt);
-            ApplyBody(b);
+            ApplyBody(b, dt);
             ApplyHead(b, dt);
             ApplyEars(b, dt);
             ApplyTail(b, dt);
@@ -468,7 +472,7 @@ namespace WorldSim.CatBasement
 
         // ---- body ----
 
-        void ApplyBody(Behaviour b)
+        void ApplyBody(Behaviour b, float dt)
         {
             float gait = GaitWeight();
 
@@ -486,6 +490,19 @@ namespace WorldSim.CatBasement
 
             float crouch = b == Behaviour.Flee ? -fleeCrouch : 0f;
 
+            // The sniff's whole-body nose-down, moved here off the cat root. Smoothed
+            // rather than snapped, but still an absolute function of the current
+            // state, so it releases completely when the sniff ends and cannot get
+            // stuck - the same property CatAgent's pose has.
+            //
+            // Composition order differs from the root tilt this replaces: the root's
+            // sniff Y-squash (0.85) now applies AFTER this rotation instead of before
+            // it, shearing the tilt down to about atan(0.85*tan(14)) = 12 effective
+            // degrees. Left at 14 for parity with the number removed; raise toward 16
+            // if a human decides the sniff wants those last 2 degrees back.
+            _bodyPitch = Mathf.Lerp(_bodyPitch, b == Behaviour.Sniff ? sniffBodyPitchDeg : 0f,
+                Damp(headResponse, dt));
+
             // Positive roll about local Z raises the RIGHT side, and a cat leans
             // into a turn (right side down when turning right), so the sign is
             // negated. Flip turnLeanDegPerRadSec if this reads backwards.
@@ -496,7 +513,7 @@ namespace WorldSim.CatBasement
             float pitch = Mathf.Clamp(-_accel * accelPitchDegPerMSS, -maxAccelPitchDeg, maxAccelPitchDeg);
 
             visual.localPosition = _visualRest.Pos + new Vector3(sway, bob + breath + crouch, 0f);
-            visual.localRotation = _visualRest.Rot * Quaternion.Euler(pitch, 0f, lean);
+            visual.localRotation = _visualRest.Rot * Quaternion.Euler(pitch + _bodyPitch, 0f, lean);
             // localScale is never written. CatAgent squats by scaling the cat ROOT,
             // and the one thing that must never happen is two components multiplying
             // into the same scale.
