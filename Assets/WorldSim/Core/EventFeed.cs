@@ -228,6 +228,27 @@ namespace WorldSim.Core
         // public API
         // ------------------------------------------------------------------
 
+        /// <summary>Is anything this feed draws currently on screen?</summary>
+        public bool OverlayVisible => _panelRoot != null && _panelRoot.gameObject.activeSelf;
+
+        /// <summary>Show or hide everything this feed renders - the panel (parented to
+        /// the streaming camera) and the world-space pings. SimControl.CapturePng calls
+        /// this so a harness capture holds only simulation state: the panel carries a
+        /// wall-clock timestamp and the pings fade on wall-clock time, so leaving them
+        /// in makes two captures of the same frame differ byte for byte.
+        ///
+        /// The MJPEG stream is unaffected: the hide and the restore both happen inside
+        /// one main-thread job, before the cameras render for that frame.</summary>
+        public void SetOverlayVisible(bool visible)
+        {
+            if (_panelRoot != null) _panelRoot.gameObject.SetActive(visible);
+            for (int i = 0; i < _pings.Count; i++)
+            {
+                Transform root = _pings[i].Root;
+                if (root != null) root.gameObject.SetActive(visible);
+            }
+        }
+
         /// <summary>Push a line onto the feed. Safe to call from anywhere on the main thread.</summary>
         public void Log(string line, LogKind kind)
         {

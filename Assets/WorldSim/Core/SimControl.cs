@@ -514,6 +514,12 @@ namespace WorldSim.Core
             return sb.ToString();
         }
 
+        /// <summary>Render one frame of the capture camera as a PNG, with the debug
+        /// HUD out of shot. A capture has to be a function of simulation state alone -
+        /// the EventFeed overlay renders a wall-clock timestamp and wall-clock-timed
+        /// pings, which made five identical reset/step/capture cycles produce three
+        /// different PNGs. The overlay stays in the MJPEG stream on :8089, which exists
+        /// so a human can watch the detector's decisions; only this path excludes it.</summary>
         byte[] CapturePng()
         {
             if (captureCamera == null) return null;
@@ -522,9 +528,17 @@ namespace WorldSim.Core
             var tex = new Texture2D(captureWidth, captureHeight, TextureFormat.RGB24, false);
             RenderTexture prevTarget = captureCamera.targetTexture;
             RenderTexture prevActive = RenderTexture.active;
+            EventFeed[] feeds = FindObjectsByType<EventFeed>(FindObjectsSortMode.None);
+            var feedWasVisible = new bool[feeds.Length];
 
             try
             {
+                for (int i = 0; i < feeds.Length; i++)
+                {
+                    feedWasVisible[i] = feeds[i].OverlayVisible;
+                    feeds[i].SetOverlayVisible(false);
+                }
+
                 captureCamera.targetTexture = rt;
                 captureCamera.Render();
                 RenderTexture.active = rt;
@@ -534,6 +548,11 @@ namespace WorldSim.Core
             }
             finally
             {
+                // Restore before this job returns, so the frame the streaming camera
+                // renders later this frame still carries the feed.
+                for (int i = 0; i < feeds.Length; i++)
+                    feeds[i].SetOverlayVisible(feedWasVisible[i]);
+
                 captureCamera.targetTexture = prevTarget;
                 RenderTexture.active = prevActive;
                 Destroy(tex);
