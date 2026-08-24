@@ -177,6 +177,8 @@ namespace WorldSim.Core
         /// requested filter already covers reach the broker.</summary>
         public void Subscribe(string topic, byte qos = QosAtMostOnce)
         {
+            List<KeyValuePair<string, byte>> add = null;
+            List<string> drop = null;
             lock (_subLock)
             {
                 // TryGetValue, not TryAdd - keeps this on the Unity-supported .NET
@@ -184,54 +186,90 @@ namespace WorldSim.Core
                 byte requested;
                 if (_subscriptions.TryGetValue(topic, out requested) && requested >= qos) return;
                 _subscriptions[topic] = qos;
-                if (IsConnected) SyncWire();
+                if (!IsConnected) return;
+                PlanWire(out add, out drop);
             }
+            ApplyWire(add, drop);
         }
 
         void ResubscribeAll()
         {
+            List<KeyValuePair<string, byte>> add = null;
+            List<string> drop = null;
             lock (_subLock)
             {
                 // Clean session: the broker remembers none of our previous filters.
+                // Clearing before planning is what makes the replay re-send every
+                // covering filter - without it the "already at this qos" check below
+                // would skip them all and the client would go silent after a
+                // reconnect. These two steps must stay in this order.
                 _wire.Clear();
-                SyncWire();
+                PlanWire(out add, out drop);
             }
+            ApplyWire(add, drop);
         }
 
-        /// <summary>Bring the wire in line with the covering set. Recomputed from
-        /// scratch every time rather than patched incrementally, so the outcome does
-        /// not depend on the order components happen to register in - a broad filter
-        /// arriving after narrow ones unsubscribes them, and a narrow one arriving
-        /// after a broad one never reaches the wire at all.
+        /// <summary>Work out what the wire needs, and record it as done. Recomputed
+        /// from scratch every time rather than patched incrementally, so the outcome
+        /// does not depend on the order components happen to register in - a broad
+        /// filter arriving after narrow ones unsubscribes them, and a narrow one
+        /// arriving after a broad one never reaches the wire at all.
+        ///
+        /// Planning is separate from sending so the socket writes happen outside
+        /// _subLock: a component calling Subscribe from OnEnable must not be able to
+        /// block another component's OnEnable behind an unresponsive broker.
         ///
         /// Caller holds _subLock.</summary>
-        void SyncWire()
+        void PlanWire(out List<KeyValuePair<string, byte>> add, out List<string> drop)
         {
-            MqttClientLite client = _client;
-            if (client == null) return;
-
+            add = null;
+            drop = null;
             Dictionary<string, byte> wanted = CoveringSet();
 
-            var stale = new List<string>();
             foreach (KeyValuePair<string, byte> have in _wire)
-                if (!wanted.ContainsKey(have.Key)) stale.Add(have.Key);
+            {
+                if (wanted.ContainsKey(have.Key)) continue;
+                if (drop == null) drop = new List<string>();
+                drop.Add(have.Key);
+            }
 
-            // Subscribe first, unsubscribe second: the other order would leave a
-            // window where nothing on the wire covers the narrow filters.
             foreach (KeyValuePair<string, byte> want in wanted)
             {
                 byte current;
                 if (_wire.TryGetValue(want.Key, out current) && current == want.Value) continue;
+                if (add == null) add = new List<KeyValuePair<string, byte>>();
+                add.Add(want);
+            }
+
+            // Record the intended state now rather than after the writes. A write
+            // that fails takes the socket with it, and the reconnect clears _wire
+            // before replaying, so an optimistic record cannot go stale for long.
+            if (add != null)
+                for (int i = 0; i < add.Count; i++) _wire[add[i].Key] = add[i].Value;
+            if (drop != null)
+                for (int i = 0; i < drop.Count; i++) _wire.Remove(drop[i]);
+        }
+
+        /// <summary>Send a plan. Called without _subLock held - see PlanWire.</summary>
+        void ApplyWire(List<KeyValuePair<string, byte>> add, List<string> drop)
+        {
+            MqttClientLite client = _client;
+            if (client == null) return;
+            try
+            {
+                // Subscribe first, unsubscribe second: the other order would leave a
+                // window where nothing on the wire covers the narrow filters.
                 // A repeated SUBSCRIBE on the same filter replaces the existing
                 // subscription rather than adding a second one, so re-issuing to
                 // raise the qos is safe.
-                client.Subscribe(want.Key, want.Value);
-                _wire[want.Key] = want.Value;
+                if (add != null)
+                    for (int i = 0; i < add.Count; i++) client.Subscribe(add[i].Key, add[i].Value);
+                if (drop != null) client.Unsubscribe(drop);
             }
-
-            if (stale.Count == 0) return;
-            client.Unsubscribe(stale);
-            for (int i = 0; i < stale.Count; i++) _wire.Remove(stale[i]);
+            catch (Exception)
+            {
+                // socket dropped mid-write; the reconnect loop replays the covering set
+            }
         }
 
         /// <summary>The requested filters that no other requested filter covers, each
@@ -282,6 +320,15 @@ namespace WorldSim.Core
                 if (b[i] == "#") return i <= n.Length;
                 if (i >= n.Length) return false;
                 // narrow reaches into arbitrary depth here; a single level cannot.
+                //
+                // This is deliberately stricter than set inclusion, and must stay
+                // that way. "#" and "+/#" match exactly the same topics, so an exact
+                // matcher would report coverage in BOTH directions, CoveringSet would
+                // drop both, and the client would end up with no wire subscriptions
+                // at all - total message loss. Refusing to let a '+' level stand in
+                // for a '#' breaks the tie so "#" survives and "+/#" is absorbed.
+                // Erring towards keeping a filter can only cost a duplicate; erring
+                // the other way loses messages. Do not "correct" this asymmetry.
                 if (n[i] == "#") return false;
                 if (b[i] == "+") continue;
                 if (b[i] != n[i]) return false;

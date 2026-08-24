@@ -153,7 +153,7 @@ namespace WorldSim.Core
                 {
                     if (!ReadPacket(out byte header, out byte[] body)) break;
 
-                    if ((header & 0xF0) != PacketPublish) continue; // CONNACK/SUBACK/PUBACK/PINGRESP: nothing to do
+                    if ((header & 0xF0) != PacketPublish) continue; // CONNACK/SUBACK/UNSUBACK/PUBACK/PINGRESP: nothing to do
 
                     int idx = 0;
                     string topic = DecodeString(body, ref idx);
