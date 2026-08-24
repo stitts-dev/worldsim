@@ -192,12 +192,15 @@ namespace WorldSim.EditorTools
             // Cone mesh is centred: 1 unit tall, 1 wide, apex up. Base is buried
             // in the skull so the ear never floats.
             float h = 0.048f * earMul;
-            Cone("Outer", pivot.transform,
+            // Leaf names are unique across the whole rig on purpose: CatVisualDump
+            // keys on leaf name so its before/after diff survives reparenting, and
+            // "Outer" appearing under both ears would collide.
+            Cone(name + "_Outer", pivot.transform,
                 new Vector3(0f, h * 0.5f, 0f),
                 new Vector3(0.056f * earMul, h, 0.030f * earMul), fur);
 
             float ih = 0.036f * earMul;
-            Cone("Inner", pivot.transform,
+            Cone(name + "_Inner", pivot.transform,
                 new Vector3(0f, ih * 0.5f, 0.008f * earMul),
                 new Vector3(0.030f * earMul, ih, 0.014f * earMul), inner);
         }
