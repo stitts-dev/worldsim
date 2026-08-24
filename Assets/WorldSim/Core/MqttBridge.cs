@@ -277,7 +277,7 @@ namespace WorldSim.Core
         /// narrow qos-1 filter under a broad qos-0 one would otherwise downgrade it.
         ///
         /// Caller holds _subLock.</summary>
-        Dictionary<string, byte> CoveringSet()
+        internal Dictionary<string, byte> CoveringSet()
         {
             var covering = new Dictionary<string, byte>();
             foreach (KeyValuePair<string, byte> candidate in _subscriptions)
