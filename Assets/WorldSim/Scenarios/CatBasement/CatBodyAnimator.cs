@@ -85,8 +85,8 @@ namespace WorldSim.CatBasement
         public bool blendToTrot = true;
 
         [Header("Body")]
-        [Tooltip("Vertical bob amplitude at full gait, metres. Two bumps per gait cycle.")]
-        public float bodyBob = 0.007f;
+        [Tooltip("Vertical bob amplitude at full gait, metres. Two bumps per gait cycle. At 7 mm this is about 1 px on the 1280x720 feed, so the default is set higher than life to stay legible from the security camera.")]
+        public float bodyBob = 0.012f;
         [Tooltip("Degrees of roll per (rad/s) of turn rate. Positive leans INTO the turn. Flip the sign if the cats lean the wrong way.")]
         public float turnLeanDegPerRadSec = 7f;
         [Tooltip("Hard cap on roll, degrees.")]
@@ -133,8 +133,8 @@ namespace WorldSim.CatBasement
         public float earResponse = 8f;
 
         [Header("Tail (a follow-through tail reads as alive cheaply)")]
-        [Tooltip("Degrees the whole tail swings per (rad/s) of body turn rate, as lag. This is the follow-through.")]
-        public float tailLagDegPerRadSec = 26f;
+        [Tooltip("Degrees of tail sweep per degree of accumulated yaw lag, per joint. This is the follow-through: 0 makes the tail rigid, 1 makes it whip hard.")]
+        public float tailLagGain = 0.52f;
         [Tooltip("Hard cap on lag sweep, degrees per joint.")]
         public float maxTailLagDeg = 18f;
         [Tooltip("Seconds of lag between the body's yaw and the tail's. Larger = whippier.")]
@@ -694,7 +694,11 @@ namespace WorldSim.CatBasement
             // Follow-through: the gap between where the body is pointing and where
             // the tail still thinks it is pointing. This is the whole trick.
             float lagAngle = Mathf.DeltaAngle(_tailYawLag, transform.eulerAngles.y);
-            float lagSweep = Mathf.Clamp(lagAngle * tailLagDegPerRadSec * 0.02f, -maxTailLagDeg, maxTailLagDeg);
+            // lagAngle is in DEGREES (a yaw difference), so this is a plain
+            // degrees-to-degrees gain - not a rate. It used to be written as a
+            // per-rad/s constant times a bare 0.02, which named the wrong units and
+            // hid the real gain inside a magic number.
+            float lagSweep = Mathf.Clamp(lagAngle * tailLagGain, -maxTailLagDeg, maxTailLagDeg);
 
             // While walking the wave rides the gait so the tail and the feet agree;
             // standing still it falls back to its own slow idle rate.
