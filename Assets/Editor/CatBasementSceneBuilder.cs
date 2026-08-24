@@ -289,6 +289,17 @@ namespace WorldSim.EditorTools
             nav.radius = 0.15f;
             nav.height = 0.3f;
             nav.stoppingDistance = 0.1f;
+            // NaturalLocomotion is the acceleration authority and eases the cat into its
+            // destination itself, so the agent is told to track the commanded speed rather
+            // than smooth it a second time. It re-applies both of these at runtime too, so
+            // a scene built before it existed behaves the same without a rebuild.
+            nav.acceleration = 30f;
+            nav.autoBraking = false;
+            // Only reached if NaturalLocomotion is ever removed - it drives rotation itself
+            // with updateRotation off. Left at a cat-plausible rate rather than Unity's 120.
+            nav.angularSpeed = 230f;
+
+            cat.AddComponent<NaturalLocomotion>();
 
             var wander = cat.AddComponent<WanderAgent>();
             wander.boundsCenter = new Vector3(0f, 0f, -0.3f);
