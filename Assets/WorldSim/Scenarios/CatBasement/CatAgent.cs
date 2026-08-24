@@ -94,6 +94,7 @@ namespace WorldSim.CatBasement
 
         WanderAgent _wander;
         NavMeshAgent _navAgent;
+        NaturalLocomotion _locomotion;
         float _normalSpeed;
         float _triggerTimer;
         float _sniffTimer;
@@ -159,6 +160,9 @@ namespace WorldSim.CatBasement
         {
             _wander = GetComponent<WanderAgent>();
             _navAgent = GetComponent<NavMeshAgent>();
+            // WanderAgent.Awake guarantees one exists; read it rather than add it, so
+            // there is exactly one place that decides whether the cat has locomotion.
+            _locomotion = GetComponent<NaturalLocomotion>();
             _baseScale = transform.localScale; // captured once, never derived from a posed scale
             if (bridge == null) bridge = FindFirstObjectByType<MqttBridge>();
         }
@@ -194,6 +198,13 @@ namespace WorldSim.CatBasement
             // published for this transition, because a teardown is not something the
             // cat did. OnEnable republishes on the way back in.
             _state = State.Wandering;
+        }
+
+        /// <summary>No-op when the cat has no NaturalLocomotion, so scenario timing never
+        /// depends on it being wired.</summary>
+        void SetGait(Gait gait)
+        {
+            if (_locomotion != null) _locomotion.SetGait(gait);
         }
 
         void ResetTrigger() => _triggerTimer = UnityEngine.Random.Range(minTriggerSec, maxTriggerSec);
@@ -383,6 +394,7 @@ namespace WorldSim.CatBasement
         void BeginMisbehavior()
         {
             _wander.Pause();
+            SetGait(Gait.Walk); // heading somewhere on purpose, not drifting
             SetState(State.WalkingToZone);
             _stateTimer = walkTimeoutSec;
 
@@ -419,6 +431,7 @@ namespace WorldSim.CatBasement
             _hasStaging = true;
 
             _wander.Pause();
+            SetGait(Gait.Walk);
             if (!_navAgent.SetDestination(staging))
             {
                 _wander.Resume();
@@ -594,7 +607,22 @@ namespace WorldSim.CatBasement
             // set or inside the routine that just wrote it.
             _hasStaging = false;
 
-            _navAgent.updateRotation = true;
+            RestoreAgentRotation();
+        }
+
+        /// <summary>Hand rotation back to whoever owns it. NaturalLocomotion drives the
+        /// body's facing at a bounded turn rate, so when it is present the NavMeshAgent's
+        /// own snap-to-heading has to stay off; without it the agent rotates itself as it
+        /// always did.</summary>
+        void RestoreAgentRotation()
+        {
+            if (_locomotion != null)
+            {
+                _locomotion.ResumeRotation();
+                if (_navAgent.enabled) _navAgent.updateRotation = false;
+                return;
+            }
+            if (_navAgent.enabled) _navAgent.updateRotation = true;
         }
 
         // ---- sniffing ----
@@ -602,6 +630,7 @@ namespace WorldSim.CatBasement
         void BeginSniff()
         {
             _wander.Pause();
+            SetGait(Gait.Prowl); // an investigation is approached slowly - that is what makes it read as one
 
             bool nearBox = HasAnyBox() && UnityEngine.Random.value < sniffNearBoxChance;
             Vector3 target = nearBox ? BoxSideSniffPoint() : FloorSniffPoint();
@@ -687,6 +716,7 @@ namespace WorldSim.CatBasement
                     _tilted = true;
                 }
                 if (_navAgent.enabled) _navAgent.updateRotation = false;
+                if (_locomotion != null) _locomotion.SuspendRotation(); // the tilt is ours to hold, not the locomotion's
                 transform.rotation = Quaternion.Euler(sniffPitchDeg, _uprightYaw, 0f);
             }
             else
@@ -696,7 +726,7 @@ namespace WorldSim.CatBasement
                     transform.rotation = Quaternion.Euler(0f, _uprightYaw, 0f);
                     _tilted = false;
                 }
-                if (_navAgent.enabled) _navAgent.updateRotation = true;
+                RestoreAgentRotation();
             }
         }
 
@@ -719,7 +749,19 @@ namespace WorldSim.CatBasement
 
             SetState(State.Fleeing); // clears any squat/sniff pose first
             _stateTimer = walkTimeoutSec;
-            _navAgent.speed = _normalSpeed * fleeSpeedMultiplier;
+            // A bolt is a gait, not a multiplier on whatever speed happened to be
+            // commanded this frame: NaturalLocomotion rewrites NavMeshAgent.speed every
+            // frame, so _normalSpeed would be a mid-ramp sample and a "flee" could come
+            // out slower than a walk.
+            if (_locomotion != null)
+            {
+                _locomotion.ClearHold();
+                _locomotion.SetGait(Gait.Dart);
+            }
+            else
+            {
+                _navAgent.speed = _normalSpeed * fleeSpeedMultiplier;
+            }
 
             Vector3 target = farCorner != null
                 ? farCorner.position
@@ -736,7 +778,8 @@ namespace WorldSim.CatBasement
 
         void EndFlee()
         {
-            _navAgent.speed = _normalSpeed;
+            if (_locomotion != null) _locomotion.SetGait(Gait.Walk);
+            else _navAgent.speed = _normalSpeed;
             ReturnToWander(true);
         }
 
