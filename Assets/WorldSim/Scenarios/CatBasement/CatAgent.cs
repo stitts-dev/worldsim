@@ -72,8 +72,6 @@ namespace WorldSim.CatBasement
         [Header("Pose (all absolute, all reversible)")]
         public float squatScaleY = 0.6f;
         public float sniffScaleY = 0.85f;
-        /// <summary>Nose-down pitch held during a sniff.</summary>
-        public float sniffPitchDeg = 14f;
 
         [Header("Flee")]
         public Transform farCorner;
@@ -111,12 +109,12 @@ namespace WorldSim.CatBasement
         State _state = State.Wandering;
         float _stateTimer;
 
-        // Pose. localScale is always recomputed from _baseScale and rotation is
-        // always restored to an absolute upright yaw, so no sequence of overlapping
-        // transitions can compound a squash or strand a tilt.
+        // Pose. localScale is always recomputed from _baseScale, never multiplied
+        // into the previous value, so no sequence of overlapping transitions can
+        // compound a squash. Rotation is not pose: NaturalLocomotion owns the root's
+        // facing outright, and the sniff's nose-down read comes from the head pivot
+        // that CatBodyAnimator drives inside the Visual subtree.
         Vector3 _baseScale = Vector3.one;
-        bool _tilted;
-        float _uprightYaw;
 
         // Box mount. _stagingNavPos is a confirmed NavMesh.SamplePosition hit,
         // captured before the cat ever leaves the mesh - it is the point we warp
@@ -156,6 +154,14 @@ namespace WorldSim.CatBasement
         /// "wander" | "sniff" | "box_use" | "misbehavior" | "flee".</summary>
         public string CurrentBehavior => BehaviorFor(_state);
 
+        /// <summary>Where the last deterrent that startled this cat came from, and
+        /// whether one ever has. Read-only and purely informational - CatBodyAnimator
+        /// uses it to turn a fleeing cat's head back over its shoulder. Nothing here
+        /// feeds pose, steering or ground truth, so it cannot affect either the
+        /// behaviour state machine or what the detector is scored against.</summary>
+        public Vector3 LastThreatPosition { get; private set; }
+        public bool HasThreat { get; private set; }
+
         void Awake()
         {
             _wander = GetComponent<WanderAgent>();
@@ -188,11 +194,11 @@ namespace WorldSim.CatBasement
         void OnDisable()
         {
             All.Remove(this);
-            // Never leave the cat squashed, tilted or floating on a box because the
-            // component (or Play mode) went away mid-routine. Deliberately touches
-            // only the transform - the NavMeshAgent may already be tearing down.
+            // Never leave the cat squashed or floating on a box because the component
+            // (or Play mode) went away mid-routine. Deliberately touches only the
+            // transform - the NavMeshAgent may already be tearing down. Rotation is
+            // not restored here because this no longer writes it.
             transform.localScale = _baseScale;
-            if (_tilted) { transform.rotation = Quaternion.Euler(0f, _uprightYaw, 0f); _tilted = false; }
             if (_offMesh) { transform.position = _groundReturnPos; _offMesh = false; }
             // Assigned directly rather than through SetState: no ground truth is
             // published for this transition, because a teardown is not something the
@@ -697,37 +703,23 @@ namespace WorldSim.CatBasement
             }
         }
 
-        /// <summary>Pose is a pure function of state, reapplied on every transition.
-        /// Scale is always recomputed from the scale the cat was built with (never
-        /// multiplied or divided by the previous value), and the sniff tilt restores to
-        /// an absolute upright yaw captured before the tilt was applied - so no
-        /// interleaving of transitions can leave the cat permanently squashed or
-        /// permanently nose-down.</summary>
+        /// <summary>Pose is height, and only height: a pure function of state,
+        /// reapplied on every transition, always recomputed from the scale the cat was
+        /// built with rather than multiplied into the previous value - so no
+        /// interleaving of transitions can leave a cat permanently squashed.
+        ///
+        /// This deliberately does not touch rotation. It used to pitch the whole body
+        /// 14 degrees nose-down for a sniff, which put it in a per-frame fight with
+        /// NaturalLocomotion once that existed: locomotion writes the root's rotation
+        /// every frame, so whichever ran last won and the likeliest outcome was the
+        /// sniff tilt vanishing silently - a behaviour class quietly becoming harder
+        /// to tell apart, with nothing in the console. Locomotion now owns root
+        /// rotation outright, and CatBodyAnimator pitches the head pivot inside the
+        /// Visual subtree instead, where nothing contends for it.</summary>
         void ApplyPose(State s)
         {
             float y = PoseScaleY(s, squatScaleY, sniffScaleY);
             transform.localScale = new Vector3(_baseScale.x, _baseScale.y * y, _baseScale.z);
-
-            if (s == State.Sniffing)
-            {
-                if (!_tilted)
-                {
-                    _uprightYaw = transform.eulerAngles.y; // read once, never off an already-tilted rotation
-                    _tilted = true;
-                }
-                if (_navAgent.enabled) _navAgent.updateRotation = false;
-                if (_locomotion != null) _locomotion.SuspendRotation(); // the tilt is ours to hold, not the locomotion's
-                transform.rotation = Quaternion.Euler(sniffPitchDeg, _uprightYaw, 0f);
-            }
-            else
-            {
-                if (_tilted)
-                {
-                    transform.rotation = Quaternion.Euler(0f, _uprightYaw, 0f);
-                    _tilted = false;
-                }
-                RestoreAgentRotation();
-            }
         }
 
         // ---- flee ----
@@ -738,6 +730,9 @@ namespace WorldSim.CatBasement
         public void FleeFrom(Vector3 threatWorldPos)
         {
             if (_state == State.Fleeing) return;
+
+            LastThreatPosition = threatWorldPos;
+            HasThreat = true;
 
             // Order matters: get back on the mesh before anything touches the agent,
             // because mid-mount the agent is switched off entirely.

@@ -283,7 +283,7 @@ namespace WorldSim.EditorTools
             // The visual hierarchy hangs off the root so CatAgent's squat, which
             // scales the root's localScale.y, compresses the cat's height rather
             // than its body length.
-            CatVisualBuilder.BuildCatVisual(cat.transform, color, name);
+            GameObject visual = CatVisualBuilder.BuildCatVisual(cat.transform, color, name);
 
             var nav = cat.AddComponent<NavMeshAgent>();
             nav.radius = 0.15f;
@@ -312,6 +312,14 @@ namespace WorldSim.EditorTools
             // cats need to know where the boxes actually are.
             agent.litterboxes = litterboxes;
             agent.bridge = bridge;
+
+            // Procedural body animation. Deliberately added AFTER CatAgent so it is
+            // the later component, and it also declares DefaultExecutionOrder(100),
+            // so its LateUpdate always runs against a root pose CatAgent has already
+            // settled for the frame. It only ever writes transforms inside the
+            // Visual subtree, which is why it cannot disturb CatAgent's pose.
+            var anim = cat.AddComponent<CatBodyAnimator>();
+            CatVisualBuilder.WireAnimator(visual, anim);
         }
 
         static void BakeNavMesh(GameObject environment)
