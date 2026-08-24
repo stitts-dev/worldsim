@@ -101,6 +101,24 @@
 - **A deterrent only makes a cat flee if `IsSquatting` is true** (`VirtualTurret.NotifySquattingCats`).
   Any test of the flee path must wait for a cat to be squatting before publishing the fire,
   or it gets a green that proves nothing.
+- **Looking at a capture proves a cue is PRESENT, not that it is the right SIZE.** At this
+  camera's framing a cat is roughly 100 px, and a visual check passed a sniff whose nose-down
+  was a third of its intended amplitude - 3.2 cm of drop from head pitch alone where head plus
+  body gives ~8.3 cm. It read as plausibly nose-down. If a pose has a target magnitude, check
+  it against the geometry or against `/inspect`, and treat "I looked at it and it seemed fine"
+  as evidence of presence only.
+
+### The pattern behind all of these
+
+Every trap above is the same shape: **the instrument was broken and the system looked fine.**
+In one session, acceptance tests passed with nothing listening on the port, an fps check passed
+numbers outside the band it printed, a wall-clock measurement reported cats at twice their
+maximum speed, and a visual check passed a third-strength animation cue. In all four the code
+under test was healthy and the thing measuring it was not.
+
+When a measurement says something surprising, suspect the measurement first. Before acting on
+a number, be able to say what would make it wrong - and prefer a check you have seen FAIL on a
+known-bad input over one you have only ever seen pass.
 
 ## Unknowns And Confidence
 
