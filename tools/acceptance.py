@@ -1,11 +1,19 @@
 #!/usr/bin/env python3
 """Acceptance harness for docs/design.md criteria 2, 4, 5, 6 (and the criterion-7
 soak). Runs against a live sim: Unity in Play mode plus a mosquitto broker on
-localhost:1883. Everything here is external to Unity on purpose — it exercises
+localhost:1883. Everything here is external to Unity on purpose - it exercises
 exactly the surface the real cat-sentry detector uses.
+
+Criteria 5 and 6 are only half covered. design.md asks for "chirp + ring in
+sim, ack published, squatting cat flees"; from outside Unity only the ack is
+visible. The chirp, the puff and the flee still need an in-editor check. The
+CRITERIA roster below says so, and the banner and summary are printed from it.
 
     python3 tools/acceptance.py            # criteria 2, 4, 5, 6
     python3 tools/acceptance.py --soak 600 # + criterion 7 (seconds)
+
+Exit codes: 0 every covered criterion passed, 1 a criterion failed, 3 the sim
+could not be reached at all - infrastructure, not a product bug.
 
 No third-party dependencies: MJPEG over http.client, MQTT over a hand-rolled
 minimal 3.1.1 client (connect/subscribe/publish/ping only).
