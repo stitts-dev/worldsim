@@ -7,7 +7,9 @@
 # for the MJPEG stream to answer, runs tools/acceptance.py over exactly the
 # surface the real cat-sentry detector uses, and tears the editor down again.
 #
-# Exit code is the harness's own: 0 all checks passed, 1 something failed.
+# Exit code is the harness's own: 0 every covered criterion passed, 1 a
+# criterion failed, 3 the sim could not be reached at all. (2 is this script's
+# own setup failures - no Unity, no mosquitto, an editor already running.)
 # Any argument is forwarded to acceptance.py (e.g. --soak 1800).
 #
 #   ./tools/run-acceptance.sh
@@ -98,9 +100,9 @@ for _ in $(seq 1 "$BOOT_TIMEOUT_SEC"); do
 done
 
 if [[ "$booted" != "1" ]]; then
-  echo "stream never came up within ${BOOT_TIMEOUT_SEC}s - see $RUN_LOG" >&2
+  echo "INFRA: stream never came up within ${BOOT_TIMEOUT_SEC}s - see $RUN_LOG" >&2
   grep -E "error CS|Exception|FrameStreamer" "$RUN_LOG" | head -20 >&2
-  exit 1
+  exit 3
 fi
 
 log "stream is live, running the Pi Unity scenario gate"
@@ -118,9 +120,9 @@ fi
 # play here instead of inheriting it from alphabetical test order.
 log "resuming the sim before the acceptance criteria"
 if ! curl -fsS --max-time 5 -o /dev/null "http://localhost:8090/play"; then
-  echo "the control surface on 8090 stopped answering during the scenario gate -" >&2
+  echo "INFRA: the control surface on 8090 stopped answering during the scenario gate -" >&2
   echo "the sim is gone, so the acceptance criteria cannot mean anything. See $RUN_LOG" >&2
-  exit 1
+  exit 3
 fi
 
 # Liveness was proved before the gate ran, and the gate reloads the scene
@@ -130,9 +132,9 @@ fi
 # failures, which sends the reader hunting for a bug in the sim. A harness that
 # blames the wrong thing costs more than one that says nothing.
 if ! curl -fsS --max-time 5 -o /dev/null "$STREAM_URL"; then
-  echo "the MJPEG stream on $STREAM_URL died during the scenario gate -" >&2
+  echo "INFRA: the MJPEG stream on $STREAM_URL died during the scenario gate -" >&2
   echo "this is an infrastructure failure, not a criterion failure. See $RUN_LOG" >&2
-  exit 1
+  exit 3
 fi
 
 python3 "$REPO/tools/acceptance.py" "$@"
