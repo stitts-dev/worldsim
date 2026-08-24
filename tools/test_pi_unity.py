@@ -17,14 +17,23 @@ SCENE = "Assets/WorldSim/Scenarios/CatBasement/CatBasement.unity"
 
 
 class PiUnityHarnessTest(unittest.TestCase):
-    def assert_clean_failure(self, scenario, output):
+    def assert_clean_failure(self, scenario, output, because):
+        """Assert the CLI failed for the stated reason, not merely that it failed.
+
+        `because` is not decoration. Every kind of breakage this tool has -
+        a bad scenario file, an unreachable sim, an unwritable output path -
+        exits 1 with a "FAIL:" line, so asserting only on those two things
+        passes even when the code under test never ran. These tests were doing
+        exactly that: six of eight passed with nothing listening on port 8090.
+        """
         result = subprocess.run(
             [sys.executable, str(TOOLS / "pi_unity.py"), str(scenario), "--output", str(output)],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
         self.assertTrue(result.stderr.startswith("FAIL:"), result.stderr)
+        self.assertIn(because, result.stderr)
         self.assertNotIn("Traceback", result.stderr)
 
     def test_expected_fields_require_presence_and_json_type(self):
@@ -100,7 +109,9 @@ class PiUnityHarnessTest(unittest.TestCase):
                     }
                 )
             )
-            self.assert_clean_failure(scenario, Path(directory) / "output")
+            self.assert_clean_failure(
+                scenario, Path(directory) / "output", "name must be filename-safe"
+            )
 
     def test_invalid_encoding_and_url_fail_cleanly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -124,9 +135,12 @@ class PiUnityHarnessTest(unittest.TestCase):
             )
             with self.assertRaises(ScenarioError):
                 load_scenario(invalid_url)
-            for scenario in (invalid_encoding, invalid_url):
+            for scenario, because in (
+                (invalid_encoding, "codec can't decode"),
+                (invalid_url, "invalid control URL"),
+            ):
                 with self.subTest(scenario=scenario.name):
-                    self.assert_clean_failure(scenario, directory / "output")
+                    self.assert_clean_failure(scenario, directory / "output", because)
 
     def test_output_path_failure_is_clean(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -137,6 +151,7 @@ class PiUnityHarnessTest(unittest.TestCase):
             self.assert_clean_failure(
                 TOOLS / "scenarios" / "cat-basement-smoke.json",
                 output,
+                "File exists",
             )
 
     def test_saved_scenario_repeats_deterministically(self):

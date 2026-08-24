@@ -28,7 +28,14 @@ class PiUnityLauncherTest(unittest.TestCase):
                 ],
                 capture_output=True,
                 text=True,
-                env={**os.environ, "UNITY": str(unity)},
+                # PI_UNITY_LOG too, not just UNITY: the launcher truncates its
+                # log on startup, so leaving it at the default would have this
+                # test destroy the real run log sitting in the repo.
+                env={
+                    **os.environ,
+                    "UNITY": str(unity),
+                    "PI_UNITY_LOG": str(Path(directory) / "pi-unity.log"),
+                },
                 timeout=10,
             )
             self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
@@ -45,7 +52,11 @@ class PiUnityLauncherTest(unittest.TestCase):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                env={**os.environ, "PI_UNITY_BOOT_TIMEOUT_SEC": "150"},
+                env={
+                    **os.environ,
+                    "PI_UNITY_BOOT_TIMEOUT_SEC": "150",
+                    "PI_UNITY_LOG": str(Path(output) / "pi-unity.log"),
+                },
                 start_new_session=True,
             )
             try:

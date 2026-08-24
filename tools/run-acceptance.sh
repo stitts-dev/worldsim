@@ -103,11 +103,36 @@ if [[ "$booted" != "1" ]]; then
   exit 1
 fi
 
-log "stream is live, running acceptance harness"
+log "stream is live, running the Pi Unity scenario gate"
 python3 "$REPO/tools/test_pi_unity.py"
 PI_UNITY_RESULT=$?
 if [[ "$PI_UNITY_RESULT" != "0" ]]; then
   exit "$PI_UNITY_RESULT"
+fi
+
+# acceptance.py needs a RUNNING sim, and until now it only got one because a
+# test that happens to sort last happens to end by calling /play. Rename that
+# test and the whole suite would run against a frozen sim without failing:
+# FrameStreamer ticks on unscaledDeltaTime, so a paused sim keeps serving
+# frames and the criteria still pass on what is really a still image. Ask for
+# play here instead of inheriting it from alphabetical test order.
+log "resuming the sim before the acceptance criteria"
+if ! curl -fsS --max-time 5 -o /dev/null "http://localhost:8090/play"; then
+  echo "the control surface on 8090 stopped answering during the scenario gate -" >&2
+  echo "the sim is gone, so the acceptance criteria cannot mean anything. See $RUN_LOG" >&2
+  exit 1
+fi
+
+# Liveness was proved before the gate ran, and the gate reloads the scene
+# several times. FrameStreamer has no DontDestroyOnLoad, so every reload stops
+# and restarts its listener - and a failed rebind kills the stream for good.
+# Without this re-probe acceptance.py reports a dead port as criterion
+# failures, which sends the reader hunting for a bug in the sim. A harness that
+# blames the wrong thing costs more than one that says nothing.
+if ! curl -fsS --max-time 5 -o /dev/null "$STREAM_URL"; then
+  echo "the MJPEG stream on $STREAM_URL died during the scenario gate -" >&2
+  echo "this is an infrastructure failure, not a criterion failure. See $RUN_LOG" >&2
+  exit 1
 fi
 
 python3 "$REPO/tools/acceptance.py" "$@"
@@ -116,7 +141,10 @@ RESULT=$?
 # Console errors are a criterion in their own right (design.md #1) and the
 # harness cannot see them from outside the process.
 log "Unity console errors during the run"
-ERRORS="$(grep -E "error CS|NullReferenceException|Exception:" "$RUN_LOG" | grep -v "^AutoPlay" | sed -n '1,20p')"
+# Exclude only AutoPlay's benign progress line. The blanket "^AutoPlay" filter
+# also swallowed "AutoPlay: could not enter Play mode - <exception>", which is
+# the one AutoPlay line this criterion exists to surface.
+ERRORS="$(grep -E "error CS|NullReferenceException|Exception:" "$RUN_LOG" | grep -v "^AutoPlay: entering Play mode" | sed -n '1,20p')"
 if [[ -n "$ERRORS" ]]; then
   printf '%s\n' "$ERRORS"
   echo "(errors above - criterion 1 is not met even if the harness passed)"

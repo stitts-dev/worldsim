@@ -2,6 +2,7 @@
 """Replay a saved Pi Unity scenario against a live simulation control surface."""
 
 import argparse
+import hashlib
 from http.client import InvalidURL
 import json
 from pathlib import Path
@@ -97,12 +98,23 @@ def expect(label, actual, expected):
             raise ScenarioError(f"{label}.{key}: expected {wanted!r}, got {got!r}")
 
 
+def capture_png(url, label):
+    """Fetch /capture and return (bytes, sha256). Rejects anything but a PNG."""
+    image = request(url, "/capture", binary=True)
+    if not image.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ScenarioError(f"{label}: /capture did not return a PNG")
+    return image, hashlib.sha256(image).hexdigest()
+
+
 def run(scenario, output, url_override=None):
     url = url_override or scenario["url"]
     doctor = request(url, "/doctor")
     expect("doctor", doctor, scenario["doctor"])
 
     baseline = None
+    baseline_digest = None
+    capture = None
+    digest = None
     final = None
     for run_number in range(1, scenario["runs"] + 1):
         request(url, "/reset", {"seed": scenario["seed"]})
@@ -116,15 +128,24 @@ def run(scenario, output, url_override=None):
                 checkpoint["expect"],
             )
             states.append(state)
+
+        # Inside the loop, not after it. The report claims the runs were
+        # deterministic; a capture taken once at the end is a picture whose
+        # reproducibility was never tested, sitting next to that claim.
+        capture, digest = capture_png(url, f"run {run_number}")
+
         if baseline is None:
-            baseline = states
-        elif states != baseline:
-            raise ScenarioError(f"run {run_number}: state differs from run 1")
+            baseline, baseline_digest = states, digest
+        else:
+            if states != baseline:
+                raise ScenarioError(f"run {run_number}: state differs from run 1")
+            if digest != baseline_digest:
+                raise ScenarioError(
+                    f"run {run_number}: capture differs from run 1 "
+                    f"({digest[:16]} vs {baseline_digest[:16]})"
+                )
         final = states[-1]
 
-    capture = request(url, "/capture", binary=True)
-    if not capture.startswith(b"\x89PNG\r\n\x1a\n"):
-        raise ScenarioError("capture: response is not a PNG")
     request(url, "/play")
 
     output.mkdir(parents=True, exist_ok=True)
@@ -135,6 +156,7 @@ def run(scenario, output, url_override=None):
         "seed": scenario["seed"],
         "runs": scenario["runs"],
         "deterministic": True,
+        "captureSha256": digest,
         "doctor": doctor,
         "checkpoints": baseline,
         "final": final,
