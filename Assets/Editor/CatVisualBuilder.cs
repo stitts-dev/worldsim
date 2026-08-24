@@ -276,6 +276,64 @@ namespace WorldSim.EditorTools
             }
         }
 
+        // ---- animation wiring ----
+
+        /// <summary>
+        /// Binds a CatBodyAnimator to the rig this builder just produced.
+        ///
+        /// Name lookup happens HERE, at build time, and the results are serialized
+        /// into the scene. The animator never searches at runtime: a rename then
+        /// fails loudly in the builder that owns the names, instead of silently
+        /// producing a cat with one leg that does not move. Missing pieces are
+        /// reported as a warning and left null - the animator validates once in
+        /// Awake and switches itself off rather than throwing every frame.
+        /// </summary>
+        public static void WireAnimator(GameObject visualRoot, WorldSim.CatBasement.CatBodyAnimator anim)
+        {
+            if (visualRoot == null || anim == null) return;
+            Transform t = visualRoot.transform;
+
+            anim.visual = t;
+            anim.hipFL = Find(t, "Hip_FL");
+            anim.hipFR = Find(t, "Hip_FR");
+            anim.hipRL = Find(t, "Hip_RL");
+            anim.hipRR = Find(t, "Hip_RR");
+            anim.headPivot = Find(t, "HeadPivot");
+            anim.earL = Find(t, "Ear_L");
+            anim.earR = Find(t, "Ear_R");
+            anim.eyeL = Find(t, "Eye_L");
+            anim.eyeR = Find(t, "Eye_R");
+
+            // Base to tip. Contiguous by construction: BuildTail names them 0..n-1,
+            // so the first gap is the end, and a short array would silently animate
+            // half a tail.
+            var segments = new System.Collections.Generic.List<Transform>();
+            for (int i = 0; ; i++)
+            {
+                // warn:false - probing one past the end is how the loop finds the
+                // end, and a warning for the sentinel would cry wolf on every build.
+                Transform seg = Find(t, "Tail_" + i, false);
+                if (seg == null) break;
+                segments.Add(seg);
+            }
+            anim.tail = segments.ToArray();
+
+            if (segments.Count < 2)
+                Debug.LogWarning(visualRoot.name + ": WireAnimator found " + segments.Count +
+                                 " tail segments; the tail will not animate.");
+        }
+
+        static Transform Find(Transform root, string name, bool warn = true)
+        {
+            foreach (Transform child in root.GetComponentsInChildren<Transform>(true))
+                if (child.name == name) return child;
+
+            if (warn)
+                Debug.LogWarning(root.name + ": WireAnimator could not find \"" + name +
+                                 "\". CatVisualBuilder and CatBodyAnimator have drifted apart.");
+            return null;
+        }
+
         // ---- palette ----
 
         struct Palette

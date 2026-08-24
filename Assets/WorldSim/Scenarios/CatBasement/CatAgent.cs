@@ -155,6 +155,14 @@ namespace WorldSim.CatBasement
         /// "wander" | "sniff" | "box_use" | "misbehavior" | "flee".</summary>
         public string CurrentBehavior => BehaviorFor(_state);
 
+        /// <summary>Where the last deterrent that startled this cat came from, and
+        /// whether one ever has. Read-only and purely informational - CatBodyAnimator
+        /// uses it to turn a fleeing cat's head back over its shoulder. Nothing here
+        /// feeds pose, steering or ground truth, so it cannot affect either the
+        /// behaviour state machine or what the detector is scored against.</summary>
+        public Vector3 LastThreatPosition { get; private set; }
+        public bool HasThreat { get; private set; }
+
         void Awake()
         {
             _wander = GetComponent<WanderAgent>();
@@ -664,6 +672,9 @@ namespace WorldSim.CatBasement
         public void FleeFrom(Vector3 threatWorldPos)
         {
             if (_state == State.Fleeing) return;
+
+            LastThreatPosition = threatWorldPos;
+            HasThreat = true;
 
             // Order matters: get back on the mesh before anything touches the agent,
             // because mid-mount the agent is switched off entirely.
