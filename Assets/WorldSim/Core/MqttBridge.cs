@@ -43,10 +43,17 @@ namespace WorldSim.Core
         string _clientId;
         SynchronizationContext _mainCtx;
 
-        // Topics we want subscribed, replayed on every (re)connect - we always
-        // connect with a clean session, so re-subscribing ourselves is simplest.
-        // Maps topic -> qos.
+        // Every filter a component has asked for, replayed on every (re)connect -
+        // we always connect with a clean session, so re-subscribing ourselves is
+        // simplest. Maps filter -> requested qos.
         readonly Dictionary<string, byte> _subscriptions = new Dictionary<string, byte>();
+        // The subset of those actually on the wire, and at what qos. A broker
+        // delivers one copy of a PUBLISH per matching subscription (MQTT 3.1.1
+        // 3.3.5), so two overlapping filters on one client turn every message into
+        // two OnMessage events - which is how one fire command produced two acks.
+        // OnMessage is broadcast to every local listener and each listener filters
+        // by topic itself, so the covering filter alone is enough.
+        readonly Dictionary<string, byte> _wire = new Dictionary<string, byte>();
         readonly object _subLock = new object();
 
         volatile bool _connecting;
@@ -165,26 +172,121 @@ namespace WorldSim.Core
 
         // ---- pub/sub ----
 
+        /// <summary>Register interest in a topic filter. Wildcards are honoured:
+        /// '+' matches one level, '#' matches the rest. Only the filters no other
+        /// requested filter already covers reach the broker.</summary>
         public void Subscribe(string topic, byte qos = QosAtMostOnce)
         {
             lock (_subLock)
             {
-                // ContainsKey, not TryAdd - keeps this on the Unity-supported .NET
+                // TryGetValue, not TryAdd - keeps this on the Unity-supported .NET
                 // API surface rather than the newer Dictionary APIs.
-                if (_subscriptions.ContainsKey(topic)) return;
+                byte requested;
+                if (_subscriptions.TryGetValue(topic, out requested) && requested >= qos) return;
                 _subscriptions[topic] = qos;
+                if (IsConnected) SyncWire();
             }
-            if (IsConnected)
-                _client.Subscribe(topic, qos);
         }
 
         void ResubscribeAll()
         {
             lock (_subLock)
             {
-                foreach (KeyValuePair<string, byte> sub in _subscriptions)
-                    _client.Subscribe(sub.Key, sub.Value);
+                // Clean session: the broker remembers none of our previous filters.
+                _wire.Clear();
+                SyncWire();
             }
+        }
+
+        /// <summary>Bring the wire in line with the covering set. Recomputed from
+        /// scratch every time rather than patched incrementally, so the outcome does
+        /// not depend on the order components happen to register in - a broad filter
+        /// arriving after narrow ones unsubscribes them, and a narrow one arriving
+        /// after a broad one never reaches the wire at all.
+        ///
+        /// Caller holds _subLock.</summary>
+        void SyncWire()
+        {
+            MqttClientLite client = _client;
+            if (client == null) return;
+
+            Dictionary<string, byte> wanted = CoveringSet();
+
+            var stale = new List<string>();
+            foreach (KeyValuePair<string, byte> have in _wire)
+                if (!wanted.ContainsKey(have.Key)) stale.Add(have.Key);
+
+            // Subscribe first, unsubscribe second: the other order would leave a
+            // window where nothing on the wire covers the narrow filters.
+            foreach (KeyValuePair<string, byte> want in wanted)
+            {
+                byte current;
+                if (_wire.TryGetValue(want.Key, out current) && current == want.Value) continue;
+                // A repeated SUBSCRIBE on the same filter replaces the existing
+                // subscription rather than adding a second one, so re-issuing to
+                // raise the qos is safe.
+                client.Subscribe(want.Key, want.Value);
+                _wire[want.Key] = want.Value;
+            }
+
+            if (stale.Count == 0) return;
+            client.Unsubscribe(stale);
+            for (int i = 0; i < stale.Count; i++) _wire.Remove(stale[i]);
+        }
+
+        /// <summary>The requested filters that no other requested filter covers, each
+        /// carrying the strongest qos any filter it absorbs asked for - dropping a
+        /// narrow qos-1 filter under a broad qos-0 one would otherwise downgrade it.
+        ///
+        /// Caller holds _subLock.</summary>
+        Dictionary<string, byte> CoveringSet()
+        {
+            var covering = new Dictionary<string, byte>();
+            foreach (KeyValuePair<string, byte> candidate in _subscriptions)
+            {
+                bool covered = false;
+                foreach (KeyValuePair<string, byte> other in _subscriptions)
+                {
+                    if (other.Key == candidate.Key) continue;
+                    // Coverage is antisymmetric for distinct filters, so this can
+                    // never eliminate both members of a pair.
+                    if (Covers(other.Key, candidate.Key)) { covered = true; break; }
+                }
+                if (covered) continue;
+
+                byte qos = candidate.Value;
+                foreach (KeyValuePair<string, byte> absorbed in _subscriptions)
+                    if (absorbed.Value > qos && Covers(candidate.Key, absorbed.Key)) qos = absorbed.Value;
+                covering[candidate.Key] = qos;
+            }
+            return covering;
+        }
+
+        /// <summary>True when every topic <paramref name="narrow"/> could match is
+        /// also matched by <paramref name="broad"/> - MQTT 3.1.1 4.7 wildcard rules
+        /// applied filter-to-filter rather than filter-to-topic.</summary>
+        internal static bool Covers(string broad, string narrow)
+        {
+            if (broad == narrow) return true;
+            if (string.IsNullOrEmpty(broad) || string.IsNullOrEmpty(narrow)) return false;
+            // A leading wildcard never matches the broker's own $SYS tree (4.7.2), so
+            // it cannot stand in for a filter that names one explicitly.
+            if (broad[0] != '$' && narrow[0] == '$') return false;
+
+            string[] b = broad.Split('/');
+            string[] n = narrow.Split('/');
+            int i = 0;
+            for (; i < b.Length; i++)
+            {
+                // '#' is always the final level and swallows every level left.
+                if (b[i] == "#") return i <= n.Length;
+                if (i >= n.Length) return false;
+                // narrow reaches into arbitrary depth here; a single level cannot.
+                if (n[i] == "#") return false;
+                if (b[i] == "+") continue;
+                if (b[i] != n[i]) return false;
+            }
+            return i == n.Length;
         }
 
         /// <summary>Fire-and-forget publish. No-op (and no queue) if not currently connected -

@@ -141,9 +141,10 @@ namespace WorldSim.Core
         float _unitsPerFontPixel = UnitsPerFontPixel;
         int _calibFrames = -1;
 
-        // duplicate suppression: overlapping subscriptions (ours is catsentry/#,
-        // VirtualTurret's is catsentry/deterrent/fire) let a broker legally deliver
-        // the same PUBLISH twice. Two identical lines look like a bug on camera.
+        // duplicate suppression: a retry from the publisher, or a QoS-1 redelivery,
+        // can put the same PUBLISH on screen twice, which looks like a bug on camera.
+        // (Overlapping subscriptions used to do this too - MqttBridge now keeps only
+        // a covering set on the wire, so that source is gone.)
         string _lastTopic, _lastPayload;
         float _lastMessageTime = -1f;
         const float DuplicateWindowSec = 0.25f;

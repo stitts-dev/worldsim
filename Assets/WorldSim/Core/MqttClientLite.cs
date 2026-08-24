@@ -29,6 +29,7 @@ namespace WorldSim.Core
         const byte PacketPuback = 0x40;
         const byte PacketSubscribe = 0x82;
         const byte PacketSuback = 0x90;
+        const byte PacketUnsubscribe = 0xA2;
         const byte PacketPingreq = 0xC0;
         const byte PacketDisconnect = 0xE0;
 
@@ -89,6 +90,23 @@ namespace WorldSim.Core
             body.AddRange(EncodeString(topic));
             body.Add(qos);
             WritePacket(PacketSubscribe, body.ToArray());
+        }
+
+        /// <summary>Drop one or more subscriptions. UNSUBSCRIBE carries a packet id
+        /// and then the filters as bare length-prefixed strings - no QoS byte, unlike
+        /// SUBSCRIBE. The UNSUBACK is swallowed by the receive loop with the other
+        /// acknowledgements.</summary>
+        public void Unsubscribe(IList<string> topics)
+        {
+            if (topics == null || topics.Count == 0) return;
+
+            var body = new List<byte>();
+            ushort pid = NextPacketId();
+            body.Add((byte)(pid >> 8));
+            body.Add((byte)(pid & 0xFF));
+            for (int i = 0; i < topics.Count; i++)
+                body.AddRange(EncodeString(topics[i]));
+            WritePacket(PacketUnsubscribe, body.ToArray());
         }
 
         public void Publish(string topic, string payload, byte qos)
