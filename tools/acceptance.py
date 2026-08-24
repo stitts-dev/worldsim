@@ -307,30 +307,43 @@ def check_telemetry(result, window=25):
 
 
 def collect_acks(client, timeout):
-    """Every payload seen on the ack topic. `client` needs only .messages()."""
-    acks = []
-    for topic, payload in client.messages(timeout):
-        if topic == ACK_TOPIC:
-            acks.append(payload)
-            break
-    return acks
+    """Every payload seen on the ack topic for the full window. `client` needs
+    only .messages(). Reading the whole window rather than stopping at the
+    first ack is what makes a duplicate ack visible."""
+    return [payload for topic, payload in client.messages(timeout) if topic == ACK_TOPIC]
 
 
 def evaluate_ack(acks, level, window):
-    """Criteria 5/6 verdict from the acks collected after one fire."""
+    """Criteria 5/6 verdict: one fire must produce EXACTLY ONE ack.
+
+    catsentry-v1 carries no correlation id, so an ack cannot be matched to the
+    fire that caused it. Counting acks in a drained window is the strongest
+    check the frozen contract allows - and it is the one that catches a turret
+    acking the same command twice."""
     if not acks:
         return False, f"no ack within {window:g}s"
-    msg = json.loads(acks[0])
+    if len(acks) != 1:
+        return False, f"{len(acks)} acks, expected 1: {acks}"
+    try:
+        msg = json.loads(acks[0])
+    except ValueError:
+        return False, f"unreadable ack (not JSON): {acks[0]!r}"
+    if not isinstance(msg, dict):
+        return False, f"unreadable ack (not a JSON object): {acks[0]!r}"
     ok = msg.get("level") == level and msg.get("ok") is True and bool(msg.get("detail"))
     return ok, f"ack {acks[0]}"
 
 
-def check_fire(result, level, criterion, window=6):
-    """Criteria 5/6: publishing a fire command produces a matching ack."""
+def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt):
+    """Criteria 5/6: publishing a fire command produces exactly one ack."""
     try:
-        client = MiniMqtt(client_id=f"acceptance-fire-{level}")
+        client = connect(client_id=f"acceptance-fire-{level}")
         client.subscribe(ACK_TOPIC)
-        time.sleep(0.5)  # let SUBACK land before firing
+        # Drain first: this consumes the SUBACK and discards any ack left over
+        # from an earlier run or fired by something else, so the count after
+        # the publish below belongs to this fire alone.
+        for _ in client.messages(drain):
+            pass
 
         fire = {
             "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
