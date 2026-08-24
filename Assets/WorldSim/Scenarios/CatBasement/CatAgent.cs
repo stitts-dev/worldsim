@@ -170,7 +170,12 @@ namespace WorldSim.CatBasement
             // nothing else ever switches it back on. OnEnable is the safe place for
             // this - unlike OnDisable it never runs during teardown.
             if (!_navAgent.enabled) _navAgent.enabled = true;
-            _normalSpeed = _navAgent.speed;
+            // Read the configured speed, not the agent's current one. WanderAgent
+            // also writes NavMeshAgent.speed, and OnDisable restores scale, rotation
+            // and position but never speed - so a disable during a flee leaves the
+            // agent at the flee multiple and this line would adopt it as the new
+            // "normal", making the next flee faster again.
+            _normalSpeed = _wander.speed;
             ResetTrigger();
             ResetSniffTimer();
             SetState(State.Wandering);
@@ -185,6 +190,9 @@ namespace WorldSim.CatBasement
             transform.localScale = _baseScale;
             if (_tilted) { transform.rotation = Quaternion.Euler(0f, _uprightYaw, 0f); _tilted = false; }
             if (_offMesh) { transform.position = _groundReturnPos; _offMesh = false; }
+            // Assigned directly rather than through SetState: no ground truth is
+            // published for this transition, because a teardown is not something the
+            // cat did. OnEnable republishes on the way back in.
             _state = State.Wandering;
         }
 
@@ -249,8 +257,23 @@ namespace WorldSim.CatBasement
                     // state and falls into this switch in the same frame, and the
                     // mount is a direct transform move - starting it from across the
                     // room would slide the cat over the floor onto the box.
-                    if (ArrivedAtDestination() && NearStagingPoint()) BeginBoxMount();
-                    else if (_stateTimer <= 0f) ReturnToWander(true);
+                    if (ArrivedAtDestination() && NearStagingPoint())
+                    {
+                        BeginBoxMount();
+                    }
+                    else if (_stateTimer <= 0f)
+                    {
+                        // Otherwise this is invisible. WalkingToBox and Wandering both
+                        // publish "wander", so the ground-truth dedup swallows the
+                        // transition, and a box-use attempt that starts and never
+                        // arrives leaves no record anywhere. This file generates the
+                        // labels a detector is scored against - correct box use
+                        // silently ceasing to be produced is worse than a crash,
+                        // because the only symptom is its absence.
+                        Debug.LogWarning(name + ": gave up walking to the litterbox after "
+                                         + walkTimeoutSec + "s - no box_use recorded for this attempt.");
+                        ReturnToWander(true);
+                    }
                     break;
 
                 case State.MountingBox:
@@ -267,9 +290,10 @@ namespace WorldSim.CatBasement
                     break;
 
                 // Sniffing keeps the misbehavior countdown running. It fires often
-                // enough that pausing the countdown for every sniff would stretch a
-                // configured 60-120 s out to roughly 85-170 s of wall clock, which is
-                // not the cadence those two numbers are set to mean.
+                // enough that pausing the countdown for every sniff would visibly
+                // stretch the configured 60-120 s window in wall-clock terms, which
+                // is not the cadence those two numbers are set to mean. (The exact
+                // stretch depends on how often sniffs land; it has not been measured.)
                 case State.WalkingToSniff:
                     _stateTimer -= Time.deltaTime;
                     _triggerTimer -= Time.deltaTime;
@@ -381,9 +405,11 @@ namespace WorldSim.CatBasement
 
         // ---- correct litterbox use ----
 
-        /// <summary>Walk to a box and use it properly. Returns false (and changes
-        /// nothing) when no box has a reachable approach point, so callers can fall
-        /// back instead of committing the cat to a routine it can't finish.</summary>
+        /// <summary>Walk to a box and use it properly. Returns false when no box has
+        /// a reachable approach point, so callers can fall back instead of committing
+        /// the cat to a routine it can't finish. A failure leaves the state machine
+        /// and the pose untouched; it may have written _targetBox and the staging
+        /// point first, which the next successful call overwrites.</summary>
         bool BeginBoxUse()
         {
             if (!TryPickBox(out Transform box, out Vector3 staging)) return false;
@@ -545,10 +571,28 @@ namespace WorldSim.CatBasement
             // re-pick, so the cat would freeze for the rest of the session.
             if (!_navAgent.isOnNavMesh)
             {
-                if (!(_hasStaging && _navAgent.Warp(_stagingNavPos)) &&
+                bool recovered = _hasStaging && _navAgent.Warp(_stagingNavPos);
+                if (!recovered &&
                     NavMesh.SamplePosition(transform.position, out NavMeshHit hit, 4f, NavMesh.AllAreas))
-                    _navAgent.Warp(hit.position);
+                    recovered = _navAgent.Warp(hit.position); // was discarded, so a failed warp read as success
+
+                // Say so. A stranded cat still runs its timers and still publishes
+                // ground truth, so it can sit on top of a box squatting in place and
+                // label itself "misbehavior" - a wrong label on correct behaviour is
+                // the most damaging thing this file can emit, and until now it
+                // happened without a single line in the console.
+                if (!recovered)
+                    Debug.LogWarning(name + ": could not return to the NavMesh at " + transform.position
+                                     + " - it is stranded and its published behavior may not match what it "
+                                     + "is doing. Recovery is retried on every later state change.");
             }
+
+            // The staging point belongs to one box routine. ReturnToNavMesh is called
+            // exactly when that routine ends or is cancelled, so forget it here -
+            // otherwise a later recovery could warp the cat back to a box it walked
+            // to minutes ago. _stagingNavPos itself is only read while _hasStaging is
+            // set or inside the routine that just wrote it.
+            _hasStaging = false;
 
             _navAgent.updateRotation = true;
         }
@@ -753,6 +797,13 @@ namespace WorldSim.CatBasement
             sb.Append('{');
             sb.Append("\"name\":").Append(SimControl.Quote(gameObject.name)).Append(',');
             sb.Append("\"type\":\"cat\",");
+            // The raw state, because the derived fields cannot separate the box
+            // states from each other. "squatting" is true for MountingBox and
+            // DismountingBox (a deterrent has to be able to startle a cat mid-hop),
+            // but the pose during those is full height - so for the ~30 frames of
+            // each hop a gate reading "squatting" sees a squat that is not on screen.
+            // Anything asserting on posture should read this field.
+            sb.Append("\"state\":").Append(SimControl.Quote(_state.ToString())).Append(',');
             sb.Append("\"behavior\":").Append(SimControl.Quote(CurrentBehavior)).Append(',');
             sb.Append("\"in_box\":").Append(IsUsingBox ? "true" : "false").Append(',');
             sb.Append("\"squatting\":").Append(IsSquatting ? "true" : "false").Append(',');
