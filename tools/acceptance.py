@@ -12,6 +12,7 @@ minimal 3.1.1 client (connect/subscribe/publish/ping only).
 """
 
 import argparse
+import hashlib
 import http.client
 import json
 import re
@@ -179,6 +180,69 @@ class MiniMqtt:
 # ---------------- criteria ----------------
 
 
+class StreamSample:
+    """Frames pulled off an MJPEG response, with the clock reading at which each
+    one was extracted. Kept as data so the criterion-2 verdicts can be reached
+    without a live sim."""
+
+    def __init__(self, started):
+        self.started = started
+        self.finished = started
+        self.sizes = []
+        self.digests = []
+        self.stamps = []
+
+    def add(self, frame, when):
+        self.sizes.append(len(frame))
+        self.digests.append(hashlib.sha1(frame).hexdigest())
+        self.stamps.append(when)
+
+    @property
+    def frames(self):
+        return len(self.sizes)
+
+
+def collect_stream_sample(resp, want_frames, timeout, clock=time.time):
+    """Extract JPEGs from an MJPEG body. `resp` needs only .read(n); `clock` is
+    injectable so a synthetic stream with known timings can be replayed."""
+    sample = StreamSample(started=clock())
+    buf = b""
+    while sample.frames < want_frames and clock() - sample.started < timeout:
+        chunk = resp.read(16384)
+        if not chunk:
+            break
+        buf += chunk
+        while True:
+            soi = buf.find(JPEG_SOI)
+            if soi < 0:
+                break
+            eoi = buf.find(JPEG_EOI, soi + 2)
+            if eoi < 0:
+                break
+            sample.add(buf[soi:eoi + 2], clock())
+            buf = buf[eoi + 2:]
+        if len(buf) > 4_000_000:
+            buf = buf[-1_000_000:]
+    sample.finished = clock()
+    return sample
+
+
+def estimate_fps(sample):
+    elapsed = sample.finished - sample.started
+    if sample.frames > 1 and elapsed > 0:
+        return (sample.frames - 1) / elapsed
+    return 0.0
+
+
+def evaluate_stream(sample, want_frames):
+    fps = estimate_fps(sample)
+    elapsed = sample.finished - sample.started
+    ok = sample.frames >= want_frames and 8.0 <= fps <= 18.0
+    median = sorted(sample.sizes)[len(sample.sizes) // 2] if sample.sizes else 0
+    return ok, (f"{sample.frames} JPEGs in {elapsed:.1f}s (~{fps:.1f} fps, contract 10-15), "
+                f"median {median} bytes")
+
+
 def check_stream(result, want_frames=5):
     """Criterion 2: /stream serves MJPEG at contract fps, /snapshot serves a JPEG."""
     try:
@@ -201,34 +265,28 @@ def check_stream(result, want_frames=5):
         ctype_ok = "multipart/x-mixed-replace" in ctype and "boundary=frame" in ctype
         result.add("C2", "/stream content-type", ctype_ok, ctype or "(none)")
 
-        frames, sizes, start = 0, [], time.time()
-        buf = b""
-        while frames < want_frames and time.time() - start < 15:
-            chunk = resp.read(16384)
-            if not chunk:
-                break
-            buf += chunk
-            while True:
-                soi = buf.find(JPEG_SOI)
-                if soi < 0:
-                    break
-                eoi = buf.find(JPEG_EOI, soi + 2)
-                if eoi < 0:
-                    break
-                sizes.append(eoi + 2 - soi)
-                buf = buf[eoi + 2:]
-                frames += 1
-            if len(buf) > 4_000_000:
-                buf = buf[-1_000_000:]
-        elapsed = time.time() - start
-        fps = (frames - 1) / elapsed if frames > 1 and elapsed > 0 else 0.0
-        ok = frames >= want_frames and 8.0 <= fps <= 18.0
-        result.add("C2", "/stream frames", ok,
-                   f"{frames} JPEGs in {elapsed:.1f}s (~{fps:.1f} fps, contract 10-15), "
-                   f"median {sorted(sizes)[len(sizes) // 2] if sizes else 0} bytes")
+        sample = collect_stream_sample(resp, want_frames, timeout=15)
+        ok, detail = evaluate_stream(sample, want_frames)
+        result.add("C2", "/stream frames", ok, detail)
         conn.close()
     except Exception as e:
         result.add("C2", "/stream frames", False, f"{type(e).__name__}: {e}")
+
+
+def evaluate_telemetry(stamps, payloads, window):
+    """Criterion 4 verdict from a collected heartbeat window."""
+    if len(stamps) < 2:
+        return False, f"only {len(stamps)} heartbeat(s) in {window}s (expected >=2)"
+    gaps = [b - a for a, b in zip(stamps, stamps[1:])]
+    avg = sum(gaps) / len(gaps)
+    try:
+        msg = json.loads(payloads[-1])
+        shape_ok = msg.get("source") == "sim" and msg.get("status") == "ok" and \
+            re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", msg.get("ts", "")) is not None
+    except json.JSONDecodeError:
+        shape_ok = False
+    ok = 8.0 <= avg <= 12.5 and shape_ok
+    return ok, f"{len(stamps)} beats, avg gap {avg:.1f}s (contract 10s), payload {payloads[-1]}"
 
 
 def check_telemetry(result, window=25):
@@ -242,27 +300,32 @@ def check_telemetry(result, window=25):
                 stamps.append(time.time())
                 payloads.append(payload)
         client.close()
-
-        if len(stamps) < 2:
-            result.add("C4", "telemetry heartbeat", False,
-                       f"only {len(stamps)} heartbeat(s) in {window}s (expected >=2)")
-            return
-        gaps = [b - a for a, b in zip(stamps, stamps[1:])]
-        avg = sum(gaps) / len(gaps)
-        try:
-            msg = json.loads(payloads[-1])
-            shape_ok = msg.get("source") == "sim" and msg.get("status") == "ok" and \
-                re.match(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$", msg.get("ts", "")) is not None
-        except json.JSONDecodeError:
-            shape_ok = False
-        ok = 8.0 <= avg <= 12.5 and shape_ok
-        result.add("C4", "telemetry heartbeat", ok,
-                   f"{len(stamps)} beats, avg gap {avg:.1f}s (contract 10s), payload {payloads[-1]}")
+        ok, detail = evaluate_telemetry(stamps, payloads, window)
+        result.add("C4", "telemetry heartbeat", ok, detail)
     except Exception as e:
         result.add("C4", "telemetry heartbeat", False, f"{type(e).__name__}: {e}")
 
 
-def check_fire(result, level, criterion):
+def collect_acks(client, timeout):
+    """Every payload seen on the ack topic. `client` needs only .messages()."""
+    acks = []
+    for topic, payload in client.messages(timeout):
+        if topic == ACK_TOPIC:
+            acks.append(payload)
+            break
+    return acks
+
+
+def evaluate_ack(acks, level, window):
+    """Criteria 5/6 verdict from the acks collected after one fire."""
+    if not acks:
+        return False, f"no ack within {window:g}s"
+    msg = json.loads(acks[0])
+    ok = msg.get("level") == level and msg.get("ok") is True and bool(msg.get("detail"))
+    return ok, f"ack {acks[0]}"
+
+
+def check_fire(result, level, criterion, window=6):
     """Criteria 5/6: publishing a fire command produces a matching ack."""
     try:
         client = MiniMqtt(client_id=f"acceptance-fire-{level}")
@@ -277,20 +340,11 @@ def check_fire(result, level, criterion):
             "reason": "acceptance test",
         }
         client.publish(FIRE_TOPIC, json.dumps(fire), qos=1)
-
-        ack = None
-        for topic, payload in client.messages(6):
-            if topic == ACK_TOPIC:
-                ack = payload
-                break
+        acks = collect_acks(client, window)
         client.close()
 
-        if ack is None:
-            result.add(criterion, f"fire level={level}", False, "no ack within 6s")
-            return
-        msg = json.loads(ack)
-        ok = msg.get("level") == level and msg.get("ok") is True and bool(msg.get("detail"))
-        result.add(criterion, f"fire level={level}", ok, f"ack {ack}")
+        ok, detail = evaluate_ack(acks, level, window)
+        result.add(criterion, f"fire level={level}", ok, detail)
     except Exception as e:
         result.add(criterion, f"fire level={level}", False, f"{type(e).__name__}: {e}")
 
