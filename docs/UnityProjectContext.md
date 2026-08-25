@@ -120,6 +120,47 @@ When a measurement says something surprising, suspect the measurement first. Bef
 a number, be able to say what would make it wrong - and prefer a check you have seen FAIL on a
 known-bad input over one you have only ever seen pass.
 
+## Known Flakes
+
+### The editor sometimes never enters Play mode (~5 occurrences, no root cause)
+
+`tools/run-acceptance.sh` and manual launches intermittently sit until the 300 s
+boot timeout with nothing serving on 8089 or 8090. It has happened both in
+isolation and twice consecutively. It clears on retry with no code change, so it
+is not a compile or scene failure.
+
+What is ruled out:
+
+- **The AI-package gotcha is NOT the cause.** `com.unity.ai.assistant` and
+  `com.unity.ai.inference` were absent from `Packages/manifest.json` on every
+  observed occurrence. (That gotcha is real and separate: Unity re-adds those
+  packages on its own, they need entitlements this account lacks, and their retry
+  loop starves AutoPlay. Strip them if they reappear.)
+- Not a compile error - `-quit` batchmode compiles clean immediately before and
+  after a hang.
+
+Evidence captured from one occurrence, which is the useful part:
+
+- The editor loads the project normally (`Loading completed in 6.1 seconds`),
+  opens the scene, launches `UnityShaderCompiler`, creates the GICache - and then
+  logs `Application is shutting down...` and `ALC ILPP context 1 is unloading`.
+- **`AutoPlay` never logs at all** - zero matches for "AutoPlay" in the whole
+  log, where a healthy boot has 3. So the editor is dying (or being told to quit)
+  before `AutoPlay`'s static constructor runs, rather than AutoPlay failing.
+- A stale `Temp/UnityLockfile` was present. Deleting it and relaunching worked
+  first time. **One instance only - not established as causal**, and the lockfile
+  may simply be normal. Worth checking next time before deleting it.
+
+What would settle it, and is still missing: the tail of the editor log at the
+moment of a hang, compared against a healthy boot's log at the same phase,
+plus whether `Temp/UnityLockfile` is present on a hang but absent on a good
+boot. If you hit this, capture that before retrying - a retry destroys the
+evidence, and it has now cost five boots' worth of time precisely because
+everyone (including me) retried first and looked second.
+
+Do not treat a single 300 s timeout as a product failure. `run-acceptance.sh`
+reports it as `INFRA:` and exits 3 for exactly this reason.
+
 ## Unknowns And Confidence
 
 - No Unity MCP is available for direct Console or hierarchy inspection; Editor log and runtime endpoints are the current evidence sources.
