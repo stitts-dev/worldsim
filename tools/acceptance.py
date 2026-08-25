@@ -48,6 +48,10 @@ BROKER_PORT = 1883
 FIRE_TOPIC = "catsentry/deterrent/fire"
 ACK_TOPIC = "catsentry/deterrent/ack"
 TELEMETRY_TOPIC = "catsentry/telemetry"
+# CatAgent publishes one message per state transition. Sim-only and additive -
+# not part of catsentry-v1, and a detector that has never heard of it simply
+# never subscribes.
+GROUNDTRUTH_TOPIC = "catsentry/groundtruth"
 
 # The catsentry-v1 frame spec. The gate and the string the harness prints both
 # come from these, so a printed claim can never outrun the code again.
@@ -58,20 +62,23 @@ STREAM_SAMPLE_FRAMES = 30
 # Flee proof (criteria 5 and 6). A misbehavior squat is on a 60-120 s random
 # cadence per cat, so waiting for one is the slow part and the default has to
 # cover the worst case with room to spare rather than the average.
+#
+# The squat itself is BRIEF in the only units that matter here. squatDurationSec
+# is 8 SIM seconds, but the editor runs the sim at ~5x real time, so a squat was
+# measured lasting 0.98-1.18 s of WALL clock. Everything between noticing the
+# squat and the sim receiving the fire has to fit inside that, which is why both
+# the detection and the flee label come off the pushed ground-truth topic rather
+# than from polling /inspect - a 0.3 s poll plus a publish spent most of the
+# window and the cat was wandering again before the deterrent landed.
 SQUAT_WAIT_SEC = 180
 # The cat sprints to a far corner of a 6x4 m room, so it clears this easily.
 # Set well above NavMesh jitter so "it twitched" cannot pass as "it fled".
 FLEE_MIN_DISTANCE_M = 0.5
 FLEE_WAIT_SEC = 15
-# How often to ask /inspect while watching for the reaction.
-#
-# This has to be fast, and the reason is not obvious. Time.captureDeltaTime is
-# pinned, so the sim advances at whatever rate the editor renders - measured at
-# ~5x real time - and the Fleeing state lasts only a second or two of SIM time.
-# Measured end to end: the flee was observable for 0.213 s of WALL clock. A
-# 0.2 s poll caught it about half the time and reported a healthy sim as a
-# criterion failure. Sampling has to be much finer than the thing sampled.
-FLEE_POLL_SEC = 0.02
+# How often to ask /inspect for the cat's POSITION. Displacement accumulates
+# and persists, so sampling it is safe; the state label is not sampled at all -
+# see wait_for_flee.
+FLEE_POLL_SEC = 0.05
 
 # One row per criterion this harness can actually judge, with a label that
 # claims no more than it proves. The banner, the summary and the exit code all
@@ -200,15 +207,44 @@ def cats_by_behavior(state, behavior):
             if e.get("type") == "cat" and e.get("behavior") == behavior]
 
 
-def wait_for_misbehaving_cat(seconds, poll=0.5, read=inspect):
-    """Block until some cat is squatting on the FLOOR, and return it.
+def wait_for_misbehaving_cat(seconds, gt_client=None, poll=0.5, read=inspect):
+    """Block until some cat starts squatting on the FLOOR, and return it.
 
-    Targets behavior == "misbehavior" and not IsSquatting, deliberately.
-    IsSquatting also covers a cat correctly using a litterbox, so firing on it
-    would prove the deterrent startles a cat that was doing nothing wrong -
-    the negative class - which is not what criteria 5 and 6 are about.
+    Targets behavior == "misbehavior", not IsSquatting, deliberately.
+    IsSquatting also covers a cat correctly using a litterbox, so firing on one
+    would prove the deterrent startles a cat that was doing nothing wrong - the
+    negative class - which is not what criteria 5 and 6 are about.
+
+    With a ground-truth client this waits on the PUSHED transition, so the fire
+    goes out at the top of the squat rather than up to a poll interval into it.
+    That margin is the difference between a check that works and one that
+    fails intermittently: the whole squat is about a second of wall clock.
+    Falls back to polling /inspect when no client is supplied.
     """
     deadline = time.time() + seconds
+    if gt_client is not None:
+        while time.time() < deadline:
+            for topic, payload in gt_client.messages(min(1.0, max(0.05, deadline - time.time()))):
+                if topic != GROUNDTRUTH_TOPIC:
+                    continue
+                try:
+                    msg = json.loads(payload)
+                except ValueError:
+                    continue
+                if msg.get("behavior") != "misbehavior":
+                    continue
+                name = msg.get("cat")
+                # Position comes from /inspect: ground truth carries no
+                # coordinates, and the origin is needed to measure displacement.
+                try:
+                    for e in read().get("entities", []):
+                        if e.get("name") == name:
+                            return e
+                except Exception:
+                    pass
+                return {"name": name, "x": 0.0, "z": 0.0}
+        return None
+
     while time.time() < deadline:
         try:
             squatting = cats_by_behavior(read(), "misbehavior")
@@ -220,45 +256,57 @@ def wait_for_misbehaving_cat(seconds, poll=0.5, read=inspect):
     return None
 
 
-def wait_for_flee(name, origin, seconds, poll=FLEE_POLL_SEC, read=inspect):
+def wait_for_flee(name, origin, seconds, gt_client, poll=FLEE_POLL_SEC, read=inspect):
     """Watch one named cat for the reaction. Returns (fled, detail).
 
-    Requires BOTH the reported behaviour and real displacement: a state field
-    alone would pass on a cat that flipped to "flee" and stood still, which is
-    the failure this check exists to catch.
+    Requires BOTH the reported behaviour and real displacement. Displacement
+    alone would pass a cat that simply wandered off; the label alone would pass
+    a turret that relabelled the cat and left it standing.
+
+    The label is taken from the catsentry/groundtruth topic, NOT by polling
+    /inspect, and that distinction is the whole reliability of this check.
+    CatAgent publishes one message per state transition, so the flee is PUSHED
+    to us and cannot be missed between samples. Polling could not do this:
+    Time.captureDeltaTime is pinned while the editor renders at ~5x real time,
+    so Fleeing - a second or two of SIM time - was measured lasting 0.213 s of
+    WALL clock. Even a 20 ms poll missed it repeatedly and reported a healthy
+    sim as a criterion failure. Position is still polled, because displacement
+    accumulates and persists rather than passing by.
     """
     ox, oz = origin
     deadline = time.time() + seconds
     best = 0.0
     saw_flee = False
+
     while time.time() < deadline:
+        for topic, payload in gt_client.messages(poll):
+            if topic != GROUNDTRUTH_TOPIC:
+                continue
+            try:
+                msg = json.loads(payload)
+            except ValueError:
+                continue
+            if msg.get("cat") == name and msg.get("behavior") == "flee":
+                saw_flee = True
+
         try:
             state = read()
         except Exception:
-            time.sleep(poll)
             continue
         for e in state.get("entities", []):
             if e.get("name") != name:
                 continue
-            moved = math.hypot(e.get("x", ox) - ox, e.get("z", oz) - oz)
-            best = max(best, moved)
-            if e.get("behavior") == "flee":
-                saw_flee = True
-            if saw_flee and best >= FLEE_MIN_DISTANCE_M:
-                return True, f"{name} fled {best:.2f} m"
-        time.sleep(poll)
+            best = max(best, math.hypot(e.get("x", ox) - ox, e.get("z", oz) - oz))
+        if saw_flee and best >= FLEE_MIN_DISTANCE_M:
+            return True, f"{name} fled {best:.2f} m"
 
     if saw_flee:
         return False, (f"{name} entered flee but only moved {best:.2f} m "
                        f"in {seconds}s (want >={FLEE_MIN_DISTANCE_M})")
     if best >= FLEE_MIN_DISTANCE_M:
-        # It went somewhere, we just never caught the label. Saying "no flee"
-        # here would blame the sim for our sampling rate - the Fleeing window is
-        # a fraction of a second of wall clock at typical editor speeds.
-        return False, (f"{name} moved {best:.2f} m but was never sampled in state "
-                       f"\"flee\" - the flee window is under a second of wall clock, "
-                       f"so this is more likely a sampling miss than a sim failure")
-    return False, (f"{name} never reported behavior \"flee\" within {seconds}s "
+        return False, (f"{name} moved {best:.2f} m but published no \"flee\" ground "
+                       f"truth - it went somewhere without the sim calling it a flee")
+    return False, (f"{name} published no \"flee\" ground truth within {seconds}s "
                    f"(moved {best:.2f} m)")
 
 
@@ -637,6 +685,7 @@ def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt,
     and a check that does not wait would pass while proving nothing at all.
     """
     target = None
+    gt = None
     if not prove_flee:
         # The label promises the flee, so a run that skipped it cannot report
         # PASS - that would be the exact disease this harness was rewritten to
@@ -647,7 +696,14 @@ def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt,
     else:
         print(f"  waiting up to {squat_wait}s for a cat to squat (60-120s cadence)...",
               flush=True)
-        target = find_squat(squat_wait)
+        # One client for the whole flee proof, opened before the wait: it
+        # carries the squat transition in, and the flee transition back out,
+        # with no window in between where a message could be missed.
+        gt = connect(client_id=f"acceptance-flee-{level}")
+        gt.subscribe(GROUNDTRUTH_TOPIC)
+        for _ in gt.messages(drain):
+            pass
+        target = find_squat(squat_wait, gt)
         if target is None:
             result.inconclusive_check(
                 criterion, f"flee after level={level}",
@@ -673,7 +729,7 @@ def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt,
 
         if target is not None:
             fled, detail = watch_flee(target["name"], (target["x"], target["z"]),
-                                      FLEE_WAIT_SEC)
+                                      FLEE_WAIT_SEC, gt)
             result.add(criterion, f"flee after level={level}", fled, detail)
 
         acks = collect_acks(client, window)
@@ -683,6 +739,12 @@ def check_fire(result, level, criterion, window=6, drain=1.0, connect=MiniMqtt,
         result.add(criterion, f"fire level={level}", ok, detail)
     except Exception as e:
         result.add(criterion, f"fire level={level}", False, f"{type(e).__name__}: {e}")
+    finally:
+        if gt is not None:
+            try:
+                gt.close()
+            except Exception:
+                pass
 
 
 def soak(result, seconds):

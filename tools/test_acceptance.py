@@ -279,47 +279,104 @@ class FleeTest(unittest.TestCase):
         self.assertIsNotNone(got)
         self.assertEqual(got["name"], "C")
 
+    def test_the_squat_is_detected_from_the_pushed_transition(self):
+        # The squat lasts ~1 s of wall clock (8 sim seconds at ~5x). Waiting on
+        # the pushed transition fires at the top of that window; polling spent
+        # much of it and the cat was wandering again before the fire landed.
+        gt = FakeMqtt([], [self.groundtruth("A", "misbehavior")])
+        got = acceptance.wait_for_misbehaving_cat(
+            5, gt, read=lambda: self.state(
+                {"name": "A", "behavior": "misbehavior", "x": 1.0, "z": 2.0}))
+        self.assertIsNotNone(got)
+        self.assertEqual(got["name"], "A")
+        self.assertEqual((got["x"], got["z"]), (1.0, 2.0))
+
+    def test_a_pushed_box_use_is_not_mistaken_for_a_squat(self):
+        gt = FakeMqtt([], [self.groundtruth("B", "box_use")])
+        got = acceptance.wait_for_misbehaving_cat(
+            0.05, gt, read=lambda: self.state(
+                {"name": "B", "behavior": "box_use", "x": 0.0, "z": 0.0}))
+        self.assertIsNone(got)
+
     def test_no_squat_in_the_window_returns_none(self):
         got = acceptance.wait_for_misbehaving_cat(
             0.05, poll=0.01,
             read=lambda: self.state({"name": "A", "behavior": "wander", "x": 0, "z": 0}))
         self.assertIsNone(got)
 
+    @staticmethod
+    def groundtruth(cat, behavior):
+        return (acceptance.GROUNDTRUTH_TOPIC,
+                json.dumps({"ts": "t", "cat": cat, "behavior": behavior, "in_box": False}))
+
     def test_a_cat_that_flees_and_moves_passes(self):
+        gt = FakeMqtt([], [self.groundtruth("A", "flee")])
         reads = [
             self.state({"name": "A", "behavior": "misbehavior", "x": 0.0, "z": 0.0}),
             self.state({"name": "A", "behavior": "flee", "x": 1.5, "z": 0.0}),
         ]
         fled, detail = acceptance.wait_for_flee(
-            "A", (0.0, 0.0), 5, poll=0, read=lambda: reads.pop(0))
+            "A", (0.0, 0.0), 5, gt, poll=0, read=lambda: reads.pop(0))
         self.assertTrue(fled, detail)
         self.assertIn("1.50 m", detail)
 
-    def test_a_cat_that_says_flee_but_stands_still_fails(self):
-        # The reason displacement is required at all: a state field alone would
-        # pass on a turret that relabelled the cat and never moved it.
+    def test_the_flee_label_is_taken_from_a_push_not_a_poll(self):
+        # The point of reading ground truth: the transition is delivered even
+        # though /inspect NEVER shows behavior "flee". At ~5x real time the
+        # Fleeing window is ~0.2 s of wall clock and polling missed it
+        # repeatedly, failing a healthy sim.
+        gt = FakeMqtt([], [self.groundtruth("A", "flee")])
         fled, detail = acceptance.wait_for_flee(
-            "A", (0.0, 0.0), 0.05, poll=0.01,
+            "A", (0.0, 0.0), 5, gt, poll=0,
+            read=lambda: self.state({"name": "A", "behavior": "wander", "x": 2.0, "z": 0.0}))
+        self.assertTrue(fled, detail)
+
+    def test_ground_truth_for_a_different_cat_does_not_count(self):
+        gt = FakeMqtt([], [self.groundtruth("B", "flee")])
+        fled, detail = acceptance.wait_for_flee(
+            "A", (0.0, 0.0), 0.05, gt, poll=0.01,
+            read=lambda: self.state({"name": "A", "behavior": "wander", "x": 2.0, "z": 0.0}))
+        self.assertFalse(fled)
+        self.assertIn("published no", detail)
+
+    def test_a_cat_that_says_flee_but_stands_still_fails(self):
+        # The reason displacement is required at all: a label alone would pass
+        # on a turret that relabelled the cat and never moved it.
+        gt = FakeMqtt([], [self.groundtruth("A", "flee")])
+        fled, detail = acceptance.wait_for_flee(
+            "A", (0.0, 0.0), 0.05, gt, poll=0.01,
             read=lambda: self.state({"name": "A", "behavior": "flee", "x": 0.01, "z": 0.0}))
         self.assertFalse(fled)
         self.assertIn("entered flee but only moved", detail)
 
     def test_a_cat_that_never_flees_fails(self):
+        gt = FakeMqtt([], [])
         fled, detail = acceptance.wait_for_flee(
-            "A", (0.0, 0.0), 0.05, poll=0.01,
+            "A", (0.0, 0.0), 0.05, gt, poll=0.01,
             read=lambda: self.state({"name": "A", "behavior": "misbehavior", "x": 0.0, "z": 0.0}))
         self.assertFalse(fled)
-        self.assertIn('never reported behavior "flee"', detail)
+        self.assertIn('published no "flee" ground truth', detail)
 
     def test_no_squat_is_inconclusive_not_a_failure(self):
         # We learned nothing about the flee. Reporting FAIL would blame the sim
         # for our timing, and reporting PASS would claim a proof we do not have.
         client = FakeMqtt([], [(ACK_TOPIC, ack())])
         result = acceptance.Result(acceptance.CRITERIA)
-        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
-                              find_squat=lambda _s: None, squat_wait=0)
+        acceptance.check_fire(result, "sound", "C5",
+                              connect=self.two_clients(client, FakeMqtt([], [])),
+                              find_squat=lambda _s, _gt=None: None, squat_wait=0)
         self.assertEqual(result.verdict("C5"), "INCONC")
         self.assertIn("never exercised", result.note("C5"))
+
+    @staticmethod
+    def two_clients(ack_client, gt_client):
+        """check_fire opens an ack client and a ground-truth client. They must
+        be distinct: with one shared stub, the ground-truth drain consumes the
+        ack and the ack half fails for a reason that has nothing to do with the
+        code under test."""
+        def connect(client_id="", **_kw):
+            return gt_client if "flee" in client_id else ack_client
+        return connect
 
     def test_no_flee_flag_is_inconclusive_not_a_pass(self):
         # Caught by running it: --no-flee reported PASS against a label that
@@ -333,11 +390,14 @@ class FleeTest(unittest.TestCase):
         self.assertIn("--no-flee", result.note("C5"))
 
     def test_a_failed_flee_fails_the_criterion_even_though_the_ack_was_fine(self):
+        # One FakeMqtt serves both the ack subscription and the ground-truth
+        # one; the drain of the second consumes nothing it needs.
         client = FakeMqtt([], [(ACK_TOPIC, ack())])
         result = acceptance.Result(acceptance.CRITERIA)
         acceptance.check_fire(
-            result, "sound", "C5", connect=lambda **kw: client,
-            find_squat=lambda _s: {"name": "A", "x": 0.0, "z": 0.0},
+            result, "sound", "C5",
+            connect=self.two_clients(client, FakeMqtt([], [])),
+            find_squat=lambda _s, _gt=None: {"name": "A", "x": 0.0, "z": 0.0},
             watch_flee=lambda *a, **k: (False, "A never moved"))
         self.assertEqual(result.verdict("C5"), "FAIL")
         ack_rows = [r for r in result.rows if r[1] == "fire level=sound"]
@@ -347,8 +407,9 @@ class FleeTest(unittest.TestCase):
         client = FakeMqtt([], [(ACK_TOPIC, ack())])
         result = acceptance.Result(acceptance.CRITERIA)
         acceptance.check_fire(
-            result, "sound", "C5", connect=lambda **kw: client,
-            find_squat=lambda _s: {"name": "A", "x": 0.0, "z": 0.0},
+            result, "sound", "C5",
+            connect=self.two_clients(client, FakeMqtt([], [])),
+            find_squat=lambda _s, _gt=None: {"name": "A", "x": 0.0, "z": 0.0},
             watch_flee=lambda *a, **k: (True, "A fled 2.10 m"))
         self.assertEqual(result.verdict("C5"), "PASS")
 
@@ -367,11 +428,12 @@ class FleeTest(unittest.TestCase):
         client.publish = watched_publish
         result = acceptance.Result(acceptance.CRITERIA)
 
-        def find(_seconds):
+        def find(_seconds, _gt=None):
             order.append("found-squat")
             return {"name": "A", "x": 0.0, "z": 0.0}
 
-        acceptance.check_fire(result, "sound", "C5", connect=lambda **kw: client,
+        acceptance.check_fire(result, "sound", "C5",
+                              connect=self.two_clients(client, FakeMqtt([], [])),
                               find_squat=find,
                               watch_flee=lambda *a, **k: (True, "A fled 2.00 m"))
         self.assertLess(order.index("found-squat"), order.index("publish"))
