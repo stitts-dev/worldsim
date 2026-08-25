@@ -108,13 +108,32 @@
   it against the geometry or against `/inspect`, and treat "I looked at it and it seemed fine"
   as evidence of presence only.
 
+- **A short-lived state cannot be caught by polling, however fast you poll.** The same pinned
+  clock that inflates speeds also SHRINKS every window: `squatDurationSec` is 8 sim seconds but
+  a squat lasts ~1 s of wall clock, and the `Fleeing` state was measured at 0.213 s. Polling at
+  0.2 s was a coin flip and 20 ms still lost, because the latency of noticing plus reacting ate
+  the window. Where the sim already PUSHES the fact - `catsentry/groundtruth` publishes one
+  message per state transition - subscribe to it instead. Sample things that accumulate and
+  persist, like position; never sample things that pass by.
+- **A mutation harness needs its own anchors verified.** Two mutations here silently stopped
+  applying when the code they patched moved, and the runner counted "could not apply" as
+  "survived" - the safe direction, but by luck rather than design. A verifier that quietly stops
+  verifying is the same failure as everything else on this list, one level up. Check that each
+  mutation actually landed before trusting the report.
+
 ### The pattern behind all of these
 
 Every trap above is the same shape: **the instrument was broken and the system looked fine.**
-In one session, acceptance tests passed with nothing listening on the port, an fps check passed
-numbers outside the band it printed, a wall-clock measurement reported cats at twice their
-maximum speed, and a visual check passed a third-strength animation cue. In all four the code
+In one session: acceptance tests passed with nothing listening on the port; an fps check passed
+numbers outside the band it printed; a wall-clock measurement reported cats at twice their
+maximum speed; a visual check passed a third-strength animation cue; a flee check reported a
+healthy sim as broken because it polled a 0.2 s window; and the mutation runner that was
+supposed to catch such things counted its own non-application as a pass. Every time, the code
 under test was healthy and the thing measuring it was not.
+
+Two of those instruments were measuring the OTHER instruments. That is not a coincidence - it
+is what makes the failure mode persistent, because the check on the check is written with the
+same confidence and gets even less scrutiny.
 
 When a measurement says something surprising, suspect the measurement first. Before acting on
 a number, be able to say what would make it wrong - and prefer a check you have seen FAIL on a
